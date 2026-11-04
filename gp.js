@@ -735,6 +735,24 @@ function mutants(parent, count, amt, maxNodes = 120) {
   return out;
 }
 
+// n children of two parents by subtree crossover (both directions, some lightly mutated),
+// each visibly different from both parents and each other.
+function offspring(A, B, count, amt = 0.3, maxNodes = 120) {
+  const sigs = [signature(A), signature(B)], out = [], strs = new Set([toString(A), toString(B)]);
+  for (let tries = 0; out.length < count && tries < count * 40; tries++) {
+    const [p, q] = tries % 2 ? [B, A] : [A, B];
+    let c = crossover(p, q, maxNodes);
+    if (rnd() < 0.35) c = mutate(c, amt, maxNodes);
+    const str = toString(c); if (strs.has(str)) continue;
+    const s = signature(c), late = tries > count * 25;
+    if (sigStd(s) < (late ? 0.005 : 0.02)) continue;
+    if (!late && sigs.some((o) => sigDist(o, s) < 0.01)) continue;
+    strs.add(str); sigs.push(s); out.push(c);
+  }
+  while (out.length < count) out.push(mutate(rnd() < 0.5 ? A : B, amt, maxNodes));
+  return out;
+}
+
 // ---------- target matching ----------
 function downsample(src, N) { // planar 3ch NxN -> (N/2)x(N/2)
   const M = N >> 1, n = N * N, m = M * M, o = new Float32Array(3 * m);
@@ -783,73 +801,167 @@ function bake(tree, a, b) {
   return { op: 'add', k: [], a: [{ op: 'mul', k: [], a: [clone(tree), { op: 'v', k: a.slice(), a: [] }] }, { op: 'v', k: b.slice(), a: [] }] };
 }
 
-// Steady-state GA with tournament selection, subtree crossover, Sims-style mutation,
-// constant hill-climbing around the champion, and a small size penalty.
-// Phenotype dedupe: two genomes whose error agrees to ~1e-5 are treated as the same image, so
-// neutral variants (dead code, tiny constant changes) can't flood the population.
+// Island-model steady-state GA.
+// - The population is split into islands that evolve independently (tournament selection,
+//   subtree crossover, Sims-style mutation, constant tuning around the island champion,
+//   small size penalty), so different islands can settle on different kinds of solution.
+// - Every `migrateEvery` evaluations each island sends a copy of its champion to the next
+//   island in a ring.
+// - Every `mateEvery` evaluations the top matches across all islands are compared by how
+//   their images look, and the two that look most different are crossed (both directions).
+// - Phenotype dedupe within an island: genomes whose error agrees to ~1e-5 count as the same
+//   image, so neutral variants can't flood an island.
 class Evolver {
   constructor(target, opts = {}) {
     this.target = target;
     this.popSize = opts.popSize || 60;
+    this.nIslands = Math.max(1, Math.min(opts.islands || 4, Math.floor(this.popSize / 8)));
     this.maxNodes = opts.maxNodes || 80;
     this.parsimony = opts.parsimony != null ? opts.parsimony : 3e-5;
     this.dedupe = opts.dedupe !== false;
     this.tune = opts.tune != null ? opts.tune : 0.12;
-    this.pop = []; this.strs = new Set(); this.keys = new Map();
-    this.evals = 0; this.improvements = 0; this.best = null;
+    this.migrateEvery = opts.migrateEvery != null ? opts.migrateEvery : 50 * this.popSize; // 0 = never
+    this.mateEvery = opts.mateEvery != null ? opts.mateEvery : 10 * this.popSize;         // 0 = never
+    this.mateTop = opts.mateTop || Math.max(6, 2 * this.nIslands);
+    this.mateStrict = opts.mateStrict !== false; // auto-mated children must beat both parents to be kept
+    const per = Math.ceil(this.popSize / this.nIslands);
+    this.islands = Array.from({ length: this.nIslands }, (_, id) => ({ id, cap: per, pop: [], strs: new Set(), keys: new Map(), best: null }));
+    this.evals = 0; this.improvements = 0; this.best = null; this.cursor = 0;
+    this.nextMigrate = this.migrateEvery; this.nextMate = this.mateEvery;
+    this.stats = { migrations: 0, matings: 0, mateKids: 0, mateKept: 0, mateBest: 0, userMatings: 0, last: null };
   }
+  get pop() { return this.all(); }
+  all() { const o = []; for (const isl of this.islands) for (const p of isl.pop) o.push(p); return o; }
   score(tree) {
-    const d = distance(tree, this.target);
+    const d = distance(tree, this.target), n = size(tree);
     this.evals++;
-    return { tree, str: toString(tree), err: d.err, rmse: d.rmse, a: d.a, b: d.b, nodes: size(tree), fit: d.err + this.parsimony * size(tree), key: Math.round(d.err * 1e5) };
+    return { tree, str: toString(tree), err: d.err, rmse: d.rmse, a: d.a, b: d.b, nodes: n, fit: d.err + this.parsimony * n, key: Math.round(d.err * 1e5), isl: -1, sig: null, origin: '' };
   }
   seed(trees) {
-    for (const t of trees) { if (this.pop.length >= this.popSize) break; this.add(this.score(t)); }
-    for (let i = 0; this.pop.length < this.popSize && i < this.popSize * 20; i++) this.add(this.score(randomInteresting(5)));
-    this.updateBest();
+    let i = 0;
+    for (const t of trees) { const isl = this.islands[i++ % this.nIslands]; if (isl.pop.length < isl.cap) this.add(isl, this.score(t)); }
+    for (const isl of this.islands) for (let k = 0; isl.pop.length < isl.cap && k < isl.cap * 20; k++) this.add(isl, this.score(randomInteresting(5)));
+    this.refreshBest();
   }
-  add(ind) {
-    if (this.strs.has(ind.str) || (this.dedupe && this.keys.has(ind.key))) return false;
-    this.pop.push(ind); this.strs.add(ind.str); if (this.dedupe) this.keys.set(ind.key, ind); return true;
+  add(isl, ind) {
+    if (isl.strs.has(ind.str) || (this.dedupe && isl.keys.has(ind.key))) return false;
+    ind.isl = isl.id; isl.pop.push(ind); isl.strs.add(ind.str); if (this.dedupe) isl.keys.set(ind.key, ind);
+    if (!isl.best || ind.fit < isl.best.fit) isl.best = ind;
+    if (!this.best || ind.fit < this.best.fit) { this.best = ind; this.improvements++; }
+    return true;
   }
-  swap(old, ind) {
-    this.pop[this.pop.indexOf(old)] = ind;
-    this.strs.delete(old.str); this.strs.add(ind.str);
-    if (this.dedupe) { this.keys.delete(old.key); this.keys.set(ind.key, ind); }
-    if (ind.fit < this.best.fit) { this.best = ind; this.improvements++; } else if (old === this.best) this.updateBest();
+  swap(isl, old, ind) {
+    ind.isl = isl.id;
+    isl.pop[isl.pop.indexOf(old)] = ind;
+    isl.strs.delete(old.str); isl.strs.add(ind.str);
+    if (this.dedupe) { isl.keys.delete(old.key); isl.keys.set(ind.key, ind); }
+    if (ind.fit < isl.best.fit) isl.best = ind; else if (old === isl.best) isl.best = isl.pop.reduce((a, b) => (b.fit < a.fit ? b : a));
+    if (ind.fit < this.best.fit) { this.best = ind; this.improvements++; } else if (old === this.best) this.refreshBest();
   }
-  updateBest() { let b = this.pop[0]; for (const p of this.pop) if (p.fit < b.fit) b = p; if (b !== this.best) { this.best = b; this.improvements++; } }
-  tour(k = 3) { let b = null; for (let i = 0; i < k; i++) { const p = this.pop[randi(this.pop.length)]; if (!b || p.fit < b.fit) b = p; } return b; }
-  child() {
+  refreshBest() {
+    let b = null;
+    for (const isl of this.islands) { isl.best = isl.pop.length ? isl.pop.reduce((a, c) => (c.fit < a.fit ? c : a)) : null; if (isl.best && (!b || isl.best.fit < b.fit)) b = isl.best; }
+    if (b !== this.best) { this.best = b; this.improvements++; }
+  }
+  updateBest() { this.refreshBest(); }
+  setParsimony(p) { this.parsimony = p; for (const q of this.all()) q.fit = q.err + p * q.nodes; this.refreshBest(); }
+  // Offer a scored child to an island: same-image twin -> keep the smaller; else replace the worst of 4 if better.
+  offer(isl, ind) {
+    if (isl.strs.has(ind.str)) return false;
+    if (this.dedupe) { const twin = isl.keys.get(ind.key); if (twin) { if (ind.fit < twin.fit) { this.swap(isl, twin, ind); return true; } return false; } }
+    if (isl.pop.length < isl.cap) return this.add(isl, ind);
+    let w = null; for (let i = 0; i < 4; i++) { const p = isl.pop[randi(isl.pop.length)]; if (!w || p.fit > w.fit) w = p; }
+    if (ind.fit < w.fit) { this.swap(isl, w, ind); return true; }
+    return false;
+  }
+  tour(isl, k = 3) { let b = null; for (let i = 0; i < k; i++) { const p = isl.pop[randi(isl.pop.length)]; if (!b || p.fit < b.fit) b = p; } return b; }
+  child(isl) {
     const r = rnd();
-    if (r < this.tune) { const t = clone(this.best.tree), ns = collect(t).filter((x) => x.node.k.length); if (ns.length) { jitterConsts(ns[randi(ns.length)].node, 0.3); return t; } }
-    if (r < this.tune + 0.3) { const c = crossover(this.tour().tree, this.tour().tree, this.maxNodes); return rnd() < 0.4 ? mutate(c, 0.4, this.maxNodes) : c; }
-    if (r < 0.96) return mutate(this.tour().tree, 0.5, this.maxNodes);
+    if (r < this.tune) { const t = clone(isl.best.tree), ns = collect(t).filter((x) => x.node.k.length); if (ns.length) { jitterConsts(ns[randi(ns.length)].node, 0.3); return t; } }
+    if (r < this.tune + 0.3) { const c = crossover(this.tour(isl).tree, this.tour(isl).tree, this.maxNodes); return rnd() < 0.4 ? mutate(c, 0.4, this.maxNodes) : c; }
+    if (r < 0.96) return mutate(this.tour(isl).tree, 0.5, this.maxNodes);
     return randomInteresting(5);
+  }
+  migrate() {
+    if (this.nIslands < 2) return;
+    const champs = this.islands.map((isl) => isl.best);
+    this.islands.forEach((isl, i) => {
+      const src = champs[(i + this.nIslands - 1) % this.nIslands];
+      const copy = Object.assign({}, src, { origin: 'migrant' });
+      this.offer(isl, copy);
+    });
+    this.stats.migrations++;
+  }
+  sigOf(ind) { if (!ind.sig) ind.sig = signature(bake(ind.tree, ind.a, ind.b), 16); return ind.sig; }
+  // Cross two individuals both ways; children go to the parents' islands. Returns a report.
+  mate(A, B, nKids, origin, strict = false) {
+    let kept = 0, bestKid = null, newBest = false;
+    for (let i = 0; i < nKids; i++) {
+      const [p, q] = i % 2 ? [B, A] : [A, B];
+      let t = crossover(p.tree, q.tree, this.maxNodes);
+      if (rnd() < 0.3) t = mutate(t, 0.25, this.maxNodes);
+      const ind = this.score(t); ind.origin = origin;
+      if (!bestKid || ind.fit < bestKid.fit) bestKid = ind;
+      const before = this.best;
+      if (strict && !(ind.fit < A.fit && ind.fit < B.fit)) continue;
+      if (this.offer(this.islands[p.isl] || this.islands[i % this.nIslands], ind)) { kept++; if (this.best !== before && this.best === ind) newBest = true; }
+    }
+    return { a: A, b: B, kids: nKids, kept, bestKid, newBest };
+  }
+  // Among the top matches overall, mate the pair whose images differ most.
+  diverseMate() {
+    // candidates: the top few distinct images of every island, so one lineage can't fill the list
+    const top = [], seen = new Set(), per = Math.max(2, Math.ceil(this.mateTop / this.nIslands));
+    for (const isl of this.islands) {
+      let k = 0;
+      for (const p of isl.pop.slice().sort((a, b) => a.fit - b.fit)) { if (k >= per) break; if (seen.has(p.key)) continue; seen.add(p.key); top.push(p); k++; }
+    }
+    if (top.length < 2) return null;
+    let bi = 0, bj = 1, bd = -1;
+    for (let i = 0; i < top.length; i++) for (let j = i + 1; j < top.length; j++) { const d = sigDist(this.sigOf(top[i]), this.sigOf(top[j])); if (d > bd) { bd = d; bi = i; bj = j; } }
+    const rep = this.mate(top[bi], top[bj], 8, 'diverse mating', this.mateStrict);
+    rep.dist = bd; rep.kind = 'diverse';
+    this.stats.matings++; this.stats.mateKids += rep.kids; this.stats.mateKept += rep.kept; if (rep.newBest) this.stats.mateBest++;
+    this.stats.last = rep;
+    return rep;
+  }
+  userMate(A, B, nKids = 16) {
+    const rep = this.mate(A, B, nKids, 'your mating');
+    rep.dist = sigDist(this.sigOf(A), this.sigOf(B)); rep.kind = 'user';
+    this.stats.userMatings++; this.stats.last = rep;
+    return rep;
   }
   step(budgetMs = 20) {
     const t0 = now();
     let n = 0;
     do {
-      const t = this.child(), str = toString(t);
-      if (this.strs.has(str)) continue;
+      const isl = this.islands[this.cursor++ % this.nIslands];
+      const t = this.child(isl), str = toString(t);
+      if (isl.strs.has(str)) continue;
       const ind = this.score(t); n++;
-      if (this.dedupe) {
-        const twin = this.keys.get(ind.key);
-        if (twin) { if (ind.fit < twin.fit) this.swap(twin, ind); continue; } // same image: keep the smaller genome
-      }
-      // replace the worst of a random handful if the child beats it
-      let w = null; for (let i = 0; i < 4; i++) { const p = this.pop[randi(this.pop.length)]; if (!w || p.fit > w.fit) w = p; }
-      if (ind.fit < w.fit) this.swap(w, ind);
+      this.offer(isl, ind);
+      if (this.migrateEvery && this.evals >= this.nextMigrate) { this.nextMigrate = this.evals + this.migrateEvery; this.migrate(); }
+      if (this.mateEvery && this.evals >= this.nextMate) { this.nextMate = this.evals + this.mateEvery; this.diverseMate(); }
     } while (now() - t0 < budgetMs);
     return n;
   }
-  sorted() { return this.pop.slice().sort((a, b) => a.fit - b.fit); }
+  sorted() { return this.all().sort((a, b) => a.fit - b.fit); }
+  // mean pairwise image difference between island champions (0 = islands have converged)
+  islandSpread() {
+    const c = this.islands.map((i) => this.sigOf(i.best)); let d = 0, n = 0;
+    for (let i = 0; i < c.length; i++) for (let j = i + 1; j < c.length; j++) { d += sigDist(c[i], c[j]); n++; }
+    return n ? d / n : 0;
+  }
+  sortedDistinct(k) { // best k with distinct images (migrants make cross-island copies)
+    const out = [], seen = new Set();
+    for (const p of this.sorted()) { if (seen.has(p.key)) continue; seen.add(p.key); out.push(p); if (out.length >= k) break; }
+    return out;
+  }
   baked(ind) { return bake(ind.tree, ind.a, ind.b); }
 }
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
-const GP = { OPS, TERMS, FUNCS, FAMILIES, setEnabled, setFamily, setAllEnabled, enabledNames, evaluate, release, toRGBA, randTree, randomInteresting, mutate, mutants, crossover, clone, size, depth,
+const GP = { OPS, TERMS, FUNCS, FAMILIES, setEnabled, setFamily, setAllEnabled, enabledNames, evaluate, release, toRGBA, randTree, randomInteresting, mutate, mutants, offspring, crossover, clone, size, depth,
   toString, pretty, parse, signature, sigStd, sigDist, Target, distance, bake, Evolver, noise2,
   setRandom: (f) => { rnd = f; }, seedRandom: (s) => { rnd = mulberry32(s); }, useMathRandom: () => { rnd = Math.random; } };
 if (typeof module !== 'undefined' && module.exports) module.exports = GP; else root.GP = GP;

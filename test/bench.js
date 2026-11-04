@@ -11,12 +11,12 @@ for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
 }
 const target = new GP.Target(rgba, N), secs = +process.argv[2] || 15;
 for (const variant of (process.argv[3] ? JSON.parse(process.argv[3]) : [{ dedupe: false, tune: 0.2 }, { dedupe: true, tune: 0.12 }])) {
-  const res = [];
-  for (const seed of [1, 2, 3]) {
+  const res = []; let sum = 0, spread = 0;
+  for (const seed of Array.from({ length: +process.argv[4] || 3 }, (_, i) => i + 1)) {
     GP.seedRandom(seed);
     const ev = new GP.Evolver(target, { popSize: 80, ...variant }); ev.seed([]);
     const t0 = Date.now(); while (Date.now() - t0 < secs * 1000) ev.step(50);
-    res.push(ev.best.rmse.toFixed(4) + '/' + ev.best.nodes + 'n');
+    res.push(ev.best.rmse.toFixed(4) + '/' + ev.best.nodes + 'n'); sum += ev.best.rmse; spread += ev.islandSpread ? ev.islandSpread() : 0;
   }
-  console.log(JSON.stringify(variant), res.join('  '));
+  console.log(JSON.stringify(variant), 'mean', (sum / res.length).toFixed(4), 'spread', (spread / res.length).toFixed(3), ' ', res.join('  '));
 }

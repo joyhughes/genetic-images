@@ -11,15 +11,18 @@ for (let i = 0; i < 9; i++) {
   const el = document.createElement('div'); el.className = 'tile' + (i === 4 ? ' center' : '');
   const cv = document.createElement('canvas');
   const zoom = document.createElement('button'); zoom.className = 'zoom'; zoom.textContent = '⤢'; zoom.title = 'Large view';
+  const heart = document.createElement('button'); heart.className = 'heart'; heart.textContent = '♥'; heart.title = 'Pick as a parent for mating';
   const badge = document.createElement('div'); badge.className = 'badge';
-  el.append(cv, zoom, badge); grid.append(el);
+  const tag = document.createElement('div'); tag.className = 'tag';
+  el.append(cv, heart, zoom, badge, tag); grid.append(el);
   el.addEventListener('click', () => onTileClick(i));
   zoom.addEventListener('click', (e) => { e.stopPropagation(); if (cells[i]) openModal(cells[i]); });
-  tiles.push({ el, cv, badge });
+  heart.addEventListener('click', (e) => { e.stopPropagation(); togglePick(i); });
+  tiles.push({ el, cv, badge, tag });
 }
 function layout() {
   const st = $('stage').getBoundingClientRect();
-  const t = Math.max(90, Math.floor(Math.min((st.width - 48 - 24) / 3, (st.height - 48 - 24) / 3)));
+  const t = Math.max(90, Math.floor(Math.min((st.width - 48 - 24) / 3, (st.height - 96 - 24) / 3)));
   document.documentElement.style.setProperty('--tile', t + 'px');
   return t;
 }
@@ -63,6 +66,7 @@ function save() {
 }
 function showGenome() { $('geno').value = cells[4] ? GP.pretty(cells[4]) : ''; $('back').disabled = !history.length; }
 function renderAll(anim) {
+  if (picks.length) clearPicks();
   cancelRenders();
   for (let i = 0; i < 9; i++) {
     const t = tiles[i]; t.badge.style.display = 'none';
@@ -76,6 +80,7 @@ function randomNine() {
   renderAll(false); showGenome(); save();
 }
 function breedFrom(parent, anim) {
+  if (picks.length) clearPicks();
   const kids = GP.mutants(parent, 8, amt());
   cells[4] = parent; CHILD_CELLS.forEach((c, j) => { cells[c] = kids[j]; });
   cancelRenders();
@@ -123,6 +128,53 @@ function onTileClick(i) {
   }
   choose(i);
 }
+
+// ---------- mating: pick two tiles with ♥ ----------
+let picks = []; // [{i, tree, ind, str}]
+function syncPicks() {
+  tiles.forEach((t, i) => {
+    const k = picks.findIndex((p) => p.i === i);
+    t.el.classList.toggle('picked', k >= 0);
+    t.tag.textContent = k >= 0 ? '♥ ' + 'AB'[k] : ''; t.tag.style.display = k >= 0 ? 'block' : 'none';
+  });
+  const bar = $('matebar');
+  bar.classList.toggle('hidden', !picks.length);
+  $('mateMsg').textContent = picks.length < 2 ? 'Pick a second parent with ♥' :
+    mode === 'A' ? 'Cross ♥A × ♥B: 16 children are scored and join the islands' : 'Cross ♥A × ♥B: A goes to the centre, 8 children around it';
+  $('mateGo').disabled = picks.length < 2;
+}
+function togglePick(i) {
+  if (!cells[i]) return;
+  const k = picks.findIndex((p) => p.i === i);
+  if (k >= 0) picks.splice(k, 1);
+  else {
+    picks.push({ i, tree: cells[i], ind: mode === 'A' ? cellInd[i] : null, str: GP.toString(cells[i]) });
+    if (picks.length > 2) picks.shift();
+  }
+  syncPicks();
+}
+function clearPicks() { picks = []; syncPicks(); }
+function mateNow() {
+  if (picks.length < 2 || busy) return;
+  const [A, B] = picks;
+  if (mode === 'A' && evo && A.ind && B.ind) {
+    const r = evo.userMate(A.ind, B.ind, 16);
+    toast(`${r.kept} of ${r.kids} children joined the islands` + (r.newBest ? ' — one is the new best!' : `; best child ${r.bestKid.rmse.toFixed(3)}`));
+    clearPicks(); shown.fill(''); showPopulation(true); drawBest(); updateStats();
+    return;
+  }
+  history.push(cells.map((t) => GP.toString(t)));
+  const kids = GP.offspring(A.tree, B.tree, 8, amt());
+  clearPicks();
+  cells[4] = A.tree; CHILD_CELLS.forEach((c, j) => { cells[c] = kids[j]; });
+  cancelRenders();
+  for (const t of tiles) t.badge.style.display = 'none';
+  drawTree(cells[4], tiles[4].cv); tiles[4].el.style.opacity = '1';
+  CHILD_CELLS.forEach((c) => { tiles[c].el.style.opacity = '0'; enqueue(() => { drawTree(cells[c], tiles[c].cv); emerge(c); }); });
+  showGenome(); save();
+}
+$('mateGo').onclick = mateNow;
+$('mateClear').onclick = clearPicks;
 
 // ---------- modal ----------
 let modalTree = null;
@@ -176,7 +228,7 @@ const tgtSize = 256;
 
 function setMode(m, keepGrid) {
   if (m === mode) return;
-  mode = m;
+  mode = m; clearPicks();
   $('tabI').classList.toggle('on', m === 'I'); $('tabA').classList.toggle('on', m === 'A');
   $('paneI').classList.toggle('hidden', m !== 'I'); $('paneA').classList.toggle('hidden', m !== 'A');
   if (m === 'A') {
@@ -259,7 +311,9 @@ function resetEvo() {
   const wasRunning = running;
   evo = null; lastBest = null; shown.fill('');
   if (!target) { updateStats(); return; }
-  evo = new GP.Evolver(target, { popSize: +$('popSize').value, parsimony: +$('pars').value * 1e-5 });
+  const pop = +$('popSize').value;
+  evo = new GP.Evolver(target, { popSize: pop, islands: +$('islands').value, parsimony: +$('pars').value * 1e-5,
+    migrateEvery: +$('migr').value * pop, mateEvery: +$('mateEv').value * pop });
   const seeds = [];
   if ($('seedC').checked) { const c = interactiveCenter(); if (c) { seeds.push(c); seeds.push(...GP.mutants(c, 8, 0.5)); } }
   evo.seed(seeds);
@@ -278,33 +332,45 @@ $('reset').onclick = resetEvo;
 $('popSize').onchange = resetEvo;
 $('res').onchange = () => { rebuildTarget(); resetEvo(); };
 $('seedC').onchange = () => {};
+$('islands').onchange = resetEvo;
+$('migr').onchange = () => { if (evo) { evo.migrateEvery = +$('migr').value * evo.popSize; evo.nextMigrate = evo.evals + evo.migrateEvery; } };
+$('mateEv').onchange = () => { if (evo) { evo.mateEvery = +$('mateEv').value * evo.popSize; evo.nextMate = evo.evals + evo.mateEvery; } };
 const parsLabel = () => { $('parsv').textContent = (+$('pars').value * 1e-5).toExponential(0) + ' / node'; };
 parsLabel();
 $('pars').oninput = () => {
   parsLabel();
-  if (evo) { evo.parsimony = +$('pars').value * 1e-5; for (const p of evo.pop) p.fit = p.err + evo.parsimony * p.nodes; evo.updateBest(); }
+  if (evo) evo.setParsimony(+$('pars').value * 1e-5);
 };
 
 function drawBest() {
   if (!evo || evo.best === lastBest) return;
   lastBest = evo.best; drawTree(evo.baked(evo.best), $('bestC'));
 }
-// Grid shows the best nine visually distinct members: best in the centre.
+// Grid: overall best in the centre, then each island's champion, then the best other distinct images.
+const cellInd = new Array(9).fill(null);
+const ORIGIN_MARK = { 'diverse mating': ' ⚭', 'your mating': ' ♥', migrant: ' →' };
 function showPopulation(force) {
   if (!evo || mode !== 'A') return;
-  const sorted = evo.sorted(), pick = [], sigs = [];
-  for (const p of sorted) {
-    if (pick.length >= 9) break;
-    const s = GP.signature(evo.baked(p), 16);
-    if (sigs.some((o) => GP.sigDist(o, s) < 0.01)) continue;
+  if (picks.length && !force) return; // hold still while the user is picking parents
+  const pick = [evo.best], sigs = [evo.sigOf(evo.best)];
+  const tryAdd = (p, minD) => {
+    if (!p || pick.length >= 9 || pick.includes(p)) return;
+    const s = evo.sigOf(p);
+    if (sigs.some((o) => GP.sigDist(o, s) < minD)) return;
     pick.push(p); sigs.push(s);
-  }
-  for (let k = 0; pick.length < 9 && k < sorted.length; k++) if (!pick.includes(sorted[k])) pick.push(sorted[k]);
+  };
+  for (const isl of evo.islands) tryAdd(isl.best, 0.004);
+  const sorted = evo.sorted();
+  for (const p of sorted) tryAdd(p, 0.01);
+  for (const p of sorted) tryAdd(p, 0);
   const order = [4].concat(CHILD_CELLS);
   pick.forEach((p, j) => {
     const i = order[j], t = tiles[i], baked = evo.baked(p);
-    cells[i] = baked;
-    t.badge.textContent = (j === 0 ? 'best ' : '') + p.rmse.toFixed(3); t.badge.style.display = 'block';
+    cells[i] = baked; cellInd[i] = p;
+    const champ = evo.islands[p.isl] && evo.islands[p.isl].best === p;
+    t.badge.textContent = (j === 0 ? 'best · ' : '') + (evo.nIslands > 1 ? `I${p.isl + 1}${champ ? '★' : ''} ` : '') + p.rmse.toFixed(3) + (ORIGIN_MARK[p.origin] || '');
+    t.badge.title = p.origin ? 'came from ' + p.origin : '';
+    t.badge.style.display = 'block';
     t.el.style.opacity = '1';
     if (shown[i] !== p.str || force) { shown[i] = p.str; enqueue(() => drawTree(baked, t.cv)); }
   });
@@ -320,8 +386,13 @@ function updateStats() {
     `evaluations  ${f(evo.evals)}  (${f(evalMark.rate)}/s)\n` +
     `generations  ${f(evo.evals / evo.popSize)}\n` +
     `best RMSE    ${b.rmse.toFixed(4)}  (${(b.rmse * 100).toFixed(1)}% of range)\n` +
-    `best size    ${b.nodes} nodes\n` +
-    `population   ${evo.popSize} at ${target.N}px` + (running ? '' : '\n(paused)');
+    `best size    ${b.nodes} nodes  (island ${b.isl + 1})\n` +
+    `population   ${evo.popSize} at ${target.N}px, ${evo.nIslands} island${evo.nIslands > 1 ? 's' : ''}\n` +
+    (evo.nIslands > 1 ? `island bests ${evo.islands.map((i) => i.best.rmse.toFixed(3)).join(' ')}\n` + `migrations   ${evo.stats.migrations}\n` : '') +
+    `diverse mates ${evo.stats.matings}: kept ${evo.stats.mateKept}/${evo.stats.mateKids} kids, ${evo.stats.mateBest} new best\n` +
+    (evo.stats.userMatings ? `your matings  ${evo.stats.userMatings}\n` : '') +
+    (evo.stats.last ? `last mating  ${evo.stats.last.kind === 'user' ? '♥ yours' : '⚭ auto'} I${evo.stats.last.a.isl + 1}×I${evo.stats.last.b.isl + 1}, diff ${evo.stats.last.dist.toFixed(3)} → ${evo.stats.last.kept}/${evo.stats.last.kids} kept\n` : '') +
+    (running ? '' : '(paused)');
 }
 
 
@@ -389,7 +460,7 @@ function frame() {
 
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
-  if (e.key === 'Escape') closeModal();
+  if (e.key === 'Escape') { if (!$('modal').classList.contains('hidden')) closeModal(); else clearPicks(); }
   else if (e.key === 'Backspace' && mode === 'I') { e.preventDefault(); back(); }
   else if (e.key === ' ' && mode === 'A') { e.preventDefault(); running ? stopAuto() : startAuto(); }
 });

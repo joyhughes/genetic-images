@@ -6,9 +6,21 @@ Open `index.html` through any static server (`python3 -m http.server`), no build
 - **Interactive**: click one of the nine images; it flies to the centre and the other eight become its
   mutants. Click the centre to re-roll its mutants. Back / Backspace undoes. Genomes are Lisp-style
   expressions you can copy, edit, and paste back.
-- **Auto-evolve**: pick or drop a target image; a steady-state GA (tournament selection, subtree
-  crossover, Sims-style mutation, constant tuning, size penalty) minimises multi-scale RMS colour
-  error after a per-channel affine colour fit, which is then baked into the genome.
+- **Mating**: ♥ any two tiles and press Mate. In interactive mode ♥A moves to the centre and the
+  eight around it are crossover children of A and B. In auto-evolve, 16 children are scored and
+  offered to the parents' islands.
+- **Auto-evolve**: pick or drop a target image. An island-model steady-state GA minimises multi-scale
+  RMS colour error after a per-channel affine colour fit (baked into the genome):
+  - islands evolve separately (tournament selection, subtree crossover, Sims-style mutation,
+    constant tuning, size penalty, phenotype dedupe) and pass champions around a ring;
+  - every few generations the two most different-looking images among each island's top matches
+    are mated (crossover both ways); a child is kept only if it beats both parents. Without that
+    rule, mated children flooded the islands and erased their differences (island spread 0.003 vs
+    0.069 with it). In 6-seed benchmarks, diverse mating didn't measurably improve the final error;
+    the gap was within run-to-run noise. Migrating every 50 rather than 20 generations kept the
+    islands ~5x more distinct at equal error;
+  - the grid shows the overall best in the centre and island champions (★) around it; ⚭ marks a
+    child of diverse mating, ♥ a child of your mating, → a migrant.
 
 ## Function families (119 primitives)
 

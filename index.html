@@ -18,7 +18,16 @@
   .tile canvas { width: 100%; height: 100%; display: block; image-rendering: auto; }
   .tile .zoom { position: absolute; right: 6px; top: 6px; width: 26px; height: 26px; border-radius: 13px; border: 0; background: #000a; color: #fff;
                 font-size: 14px; cursor: zoom-in; opacity: 0; transition: opacity .15s; }
-  .tile:hover .zoom { opacity: 1; }
+  .tile:hover .zoom, .tile:hover .heart, .tile.picked .heart { opacity: 1; }
+  .tile .heart { position: absolute; right: 36px; top: 6px; width: 26px; height: 26px; border-radius: 13px; border: 0; background: #000a; color: #ff7aa2;
+                 font-size: 14px; cursor: pointer; opacity: 0; transition: opacity .15s; padding: 0; }
+  .tile.picked { box-shadow: 0 0 0 3px #ff5c8a !important; }
+  .tile.picked .heart { background: #ff5c8a; color: #fff; }
+  .tile .tag { position: absolute; left: 6px; top: 6px; font: bold 12px system-ui; background: #ff5c8a; color: #fff; padding: 2px 7px; border-radius: 10px; display: none; }
+  #matebar { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); background: #26181e; border: 1px solid #ff5c8a; border-radius: 8px;
+             padding: 6px 8px 6px 14px; display: flex; gap: 10px; align-items: center; z-index: 5; white-space: nowrap; }
+  #matebar span { color: #ffc2d4; font-size: 13px; }
+  #mateGo { background: #ff5c8a; border-color: #ff5c8a; color: #fff; font-weight: 600; }
   .tile .badge { position: absolute; left: 6px; bottom: 6px; font: 11px ui-monospace, monospace; background: #000a; padding: 1px 5px; border-radius: 3px; display: none; }
   .tile.pending canvas { opacity: .25; }
   .fly { position: fixed; z-index: 10; border-radius: 6px; pointer-events: none; transition: transform .45s cubic-bezier(.5,0,.2,1); }
@@ -64,14 +73,16 @@
 </style>
 </head>
 <body>
-<div id="stage"><div id="grid"></div></div>
+<div id="stage"><div id="grid"></div>
+  <div id="matebar" class="hidden"><span id="mateMsg"></span><button id="mateGo">♥ Mate</button><button id="mateClear">Clear</button></div>
+</div>
 <aside>
   <h1>Genetic Images</h1>
   <div class="sub">Expression-tree evolution after Karl Sims, 1991</div>
   <div class="tabs"><button id="tabI" class="on">Interactive</button><button id="tabA">Auto-evolve</button></div>
 
   <section id="paneI">
-    <div class="help">Click any image: it moves to the centre and the other eight become its mutants. Click the centre to mutate again. ⤢ opens a large view.</div>
+    <div class="help">Click any image: it moves to the centre and the other eight become its mutants. Click the centre to mutate again. ⤢ opens a large view. ♥ two images to mate them.</div>
     <label>Mutation amount <span id="amtv"></span></label>
     <input id="amt" type="range" min="0.05" max="1" step="0.05" value="0.5">
     <div class="row">
@@ -85,7 +96,7 @@
   </section>
 
   <section id="paneA" class="hidden">
-    <div class="help">Evolves a population to minimise distance to the target (multi-scale RMS colour error, after a best-fit colour scale per channel). The grid shows the best nine; click one to take it back to interactive breeding.</div>
+    <div class="help">Evolves a population to minimise distance to the target (multi-scale RMS colour error, after a best-fit colour scale per channel). The population is split into islands that evolve separately and swap champions in a ring; every few generations the two most different-looking of the islands' top matches are mated, and a child is kept only if it beats both parents. The grid shows the overall best in the centre and each island's champion (★) around it — ⚭ marks a child of diverse mating, → a migrant. ♥ two to mate them yourself; click one to take it to interactive breeding.</div>
     <div class="pair">
       <figure><canvas id="tgtC" width="160" height="160"></canvas><figcaption>Target</figcaption></figure>
       <figure><canvas id="bestC" width="160" height="160"></canvas><figcaption>Best so far</figcaption></figure>
@@ -111,6 +122,13 @@
     <div class="row">
       <label style="flex:1">Population <select id="popSize"><option>40</option><option>80</option><option selected>150</option><option>300</option></select></label>
       <label style="flex:1">Resolution <select id="res"><option>32</option><option selected>48</option><option>64</option></select></label>
+    </div>
+    <div class="row">
+      <label style="flex:1">Islands <select id="islands"><option>1</option><option>2</option><option selected>4</option><option>6</option><option>8</option></select></label>
+      <label style="flex:1">Migrate <select id="migr"><option value="0">never</option><option value="5">every 5 gen</option><option value="20">every 20 gen</option><option value="50" selected>every 50 gen</option></select></label>
+    </div>
+    <div class="row">
+      <label style="flex:1">Diverse mating of top matches <select id="mateEv"><option value="0">off</option><option value="1">every gen</option><option value="4">every 4 gen</option><option value="10" selected>every 10 gen</option></select></label>
     </div>
     <label>Size penalty <span id="parsv"></span></label>
     <input id="pars" type="range" min="0" max="20" step="1" value="3">
