@@ -165,6 +165,11 @@
       <input id="offRate" type="range" min="5" max="100" step="5" value="35">
       <div class="help" style="margin:2px 0 0">Lets each ◎ function (rings, spirals, stars, rotate, zoom, swirl, kaleidoscope, fractals…) have its own centre instead of the middle of the image. The slider sets how often a new function gets an offset; mutation also moves, adds and removes centres. In genomes an offset is written after the name: <code>(rings@0.3,-0.2 5)</code>.</div>
     </div>
+    <div class="offbox">
+      <label class="offhead"><input id="boxOn" type="checkbox"> Localized functions <span id="boxv" class="count"></span></label>
+      <input id="boxRate" type="range" min="5" max="100" step="5" value="20">
+      <div class="help" style="margin:2px 0 0">Runs a function only inside a box with smoothed edges: inside you see the function, outside its first argument passes through unchanged, so features stay local. Only functions with arguments get boxes (a boxed leaf typed by hand fades to mid-grey). The slider sets how often a new function gets a box; mutation moves, resizes, softens, adds and removes boxes. Written <code>(swirl#cx,cy,w,h,soft 0.7 …)</code>, with w and h the half-width and half-height.</div>
+    </div>
     <div id="famList"></div>
   </section>
 </aside>

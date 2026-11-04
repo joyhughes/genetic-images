@@ -17,6 +17,14 @@ Open `index.html` through any static server (`python3 -m http.server`), no build
   about c. New centred nodes get an offset with the chosen probability; mutation moves, adds and
   removes centres. x, y, grad and noise have none (an offset would only be a constant or reseed).
   No measurable evaluation cost (`test/offset.test.js` checks the semantics).
+- **Localized functions** (checkbox + rate, off by default): any node can carry a box
+  `node.b = [cx, cy, halfW, halfH, soft]`, written `(swirl#0.2,-0.3,0.4,0.3,0.08 0.7 …)`. Its result
+  is blended with its first argument through a smoothstep-edged box mask (leaves fade to 0, mid-grey),
+  so the function only acts locally. Evolution boxes only functions with arguments: boxed leaves made
+  mostly flat grey images. The first argument is evaluated once and reused by the op
+  (`ctx.memo`). Mutation moves, resizes and softens boxes, and adds and removes them. On the sunset
+  benchmark (6 seeds, 20 s) boxes didn't improve the match: mean RMSE 0.060 without, 0.062 at
+  15% (within noise), 0.086 at 35%. They're for the look, not the fit.
 - **Movies** (🎬 in either mode): every new centre you pick, and every new best of an auto-evolve
   run, is recorded. The movie steps through them (thinned evenly to the length you choose).
   Consecutive genomes with the same tree shape morph by interpolating their constants frame by

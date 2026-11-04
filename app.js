@@ -543,6 +543,18 @@ try { const o = JSON.parse(store.get('gi.offset') || 'null'); if (o) { $('offOn'
 $('offOn').onchange = applyOffsets;
 $('offRate').oninput = applyOffsets;
 applyOffsets();
+// Localized functions: probability a new function is confined to a soft-edged box.
+function applyBoxes() {
+  const on = $('boxOn').checked, pct = +$('boxRate').value;
+  GP.setBoxRate(on ? pct / 100 : 0);
+  $('boxRate').disabled = !on;
+  $('boxv').textContent = on ? pct + '% of new functions' : 'off';
+  store.set('gi.box', JSON.stringify({ on, pct }));
+}
+try { const o = JSON.parse(store.get('gi.box') || 'null'); if (o) { $('boxOn').checked = !!o.on; $('boxRate').value = o.pct; } } catch (e) { /* defaults */ }
+$('boxOn').onchange = applyBoxes;
+$('boxRate').oninput = applyBoxes;
+applyBoxes();
 
 // ---------- main loop ----------
 function frame() {

@@ -13,7 +13,7 @@ const target = new GP.Target(rgba, N), secs = +process.argv[2] || 15;
 for (const variant of (process.argv[3] ? JSON.parse(process.argv[3]) : [{ dedupe: false, tune: 0.2 }, { dedupe: true, tune: 0.12 }])) {
   const res = []; let sum = 0, spread = 0;
   for (const seed of Array.from({ length: +process.argv[4] || 3 }, (_, i) => i + 1)) {
-    GP.seedRandom(seed);
+    GP.seedRandom(seed); GP.setOffsetRate(variant.offsetRate || 0); GP.setBoxRate(variant.boxRate || 0);
     const ev = new GP.Evolver(target, { popSize: 80, ...variant }); ev.seed([]);
     const t0 = Date.now(); while (Date.now() - t0 < secs * 1000) ev.step(50);
     res.push(ev.best.rmse.toFixed(4) + '/' + ev.best.nodes + 'n'); sum += ev.best.rmse; spread += ev.islandSpread ? ev.islandSpread() : 0;

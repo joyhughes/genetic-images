@@ -73,6 +73,34 @@ function def(name, arity, k, w, ev) { const op = { name, arity, k: k || [], w, e
 // back), and coordinate-producing ops add o back, so e.g. rot@c rotates its child about c.
 function E(ctx, node, X, Y) {
   if (ctx.alias.size) { const ax = ctx.alias.get(X); if (ax) { X = ax; Y = ctx.alias.get(Y); } }
+  if (ctx.memo && ctx.memo.node === node && ctx.memo.X === X) { const o = pool.get(ctx.memo.buf.length); o.set(ctx.memo.buf); return o; }
+  if (node.b) return boxed(ctx, node, X, Y);
+  return E1(ctx, node, X, Y);
+}
+// Localized function: node.b = [cx, cy, hw, hh, soft] is a box (in the parent's coordinates) with
+// smoothstep edges of width ~2*soft. Inside, the node's own result; outside, its first argument
+// passes through unchanged (or mid-grey 0 for leaves), so the function acts only in that region.
+function boxMask(ctx, b, X, Y) {
+  const n = ctx.n, m = pool.get(n), cx = b[0], cy = b[1], hw = b[2], hh = b[3], s = Math.max(1e-3, b[4]);
+  const edge = (d, h) => { const t = (d - (h - s)) / (2 * s); return t <= 0 ? 1 : t >= 1 ? 0 : 1 - t * t * (3 - 2 * t); };
+  let any = false;
+  for (let i = 0; i < n; i++) { const v = edge(Math.abs(X[i] - cx), hw) * edge(Math.abs(Y[i] - cy), hh); m[i] = v; if (v > 0) any = true; }
+  return any ? m : (pool.put(m), null);
+}
+function boxed(ctx, node, X, Y) {
+  const n = ctx.n, m = boxMask(ctx, node.b, X, Y);
+  let base = null;
+  if (node.a.length) base = E(ctx, node.a[0], X, Y);
+  if (!m) return base || pool.get(3 * n).fill(0);
+  // the op's own call to its first child at these coordinates reuses base instead of recomputing it
+  const prev = ctx.memo; if (base) ctx.memo = { node: node.a[0], X, buf: base };
+  const f = E1(ctx, node, X, Y);
+  ctx.memo = prev;
+  if (base) { for (let c = 0; c < 3; c++) { const o = c * n; for (let i = 0; i < n; i++) f[o + i] = base[o + i] + (f[o + i] - base[o + i]) * m[i]; } pool.put(base); }
+  else for (let c = 0; c < 3; c++) { const o = c * n; for (let i = 0; i < n; i++) f[o + i] *= m[i]; }
+  pool.put(m); return f;
+}
+function E1(ctx, node, X, Y) {
   const op = OPS[node.op];
   if (!node.o || !op.centred) return op.ev(ctx, node, X, Y);
   const n = ctx.n, Xs = pool.get(n), Ys = pool.get(n), cx = node.o[0], cy = node.o[1];
@@ -585,6 +613,19 @@ let offsetRate = 0;
 const genOffset = () => [clamp(gauss() * 0.45, -0.95, 0.95), clamp(gauss() * 0.45, -0.95, 0.95)];
 function setOffsetRate(p) { offsetRate = Math.max(0, Math.min(1, +p || 0)); }
 const getOffsetRate = () => offsetRate;
+// Probability that a newly created node is localized to a soft-edged box (0 = whole image).
+let boxRate = 0;
+const genBox = () => [rand(-0.8, 0.8), rand(-0.8, 0.8), Math.exp(rand(Math.log(0.08), Math.log(0.6))), Math.exp(rand(Math.log(0.08), Math.log(0.6))),
+  Math.exp(rand(Math.log(0.02), Math.log(0.3)))];
+function setBoxRate(p) { boxRate = Math.max(0, Math.min(1, +p || 0)); }
+const getBoxRate = () => boxRate;
+function jitterBox(b, amt) {
+  const which = randi(4);
+  if (which === 0) { b[0] = clamp(b[0] + gauss() * 0.15 * amt, -1.3, 1.3); b[1] = clamp(b[1] + gauss() * 0.15 * amt, -1.3, 1.3); }
+  else if (which === 1) b[2] = clamp(b[2] * Math.exp(gauss() * 0.3 * amt), 0.02, 1.5);
+  else if (which === 2) b[3] = clamp(b[3] * Math.exp(gauss() * 0.3 * amt), 0.02, 1.5);
+  else b[4] = clamp(b[4] * Math.exp(gauss() * 0.4 * amt), 0.005, 0.6);
+}
 
 let ATERMS = TERMS.slice(), AFUNCS = FUNCS.slice();
 function refreshActive() {
@@ -624,7 +665,7 @@ function toRGBA(buf, N, out) {
 }
 
 // ---------- tree utilities ----------
-function clone(t) { const c = { op: t.op, k: t.k.slice(), a: t.a.map(clone) }; if (t.o) c.o = t.o.slice(); return c; }
+function clone(t) { const c = { op: t.op, k: t.k.slice(), a: t.a.map(clone) }; if (t.o) c.o = t.o.slice(); if (t.b) c.b = t.b.slice(); return c; }
 function size(t) { let s = 1; for (const c of t.a) s += size(c); return s; }
 function depth(t) { let d = 0; for (const c of t.a) d = Math.max(d, depth(c)); return d + 1; }
 function collect(t, out = [], parent = null, idx = -1, d = 0) { out.push({ node: t, parent, idx, d }); t.a.forEach((c, i) => collect(c, out, t, i, d + 1)); return out; }
@@ -632,6 +673,7 @@ function pickWeighted(list) { let s = 0; for (const o of list) s += o.w; let r =
 function makeNode(op, kids) {
   const nd = { op: op.name, k: op.k.map((s) => s.gen()), a: kids };
   if (offsetRate > 0 && op.centred && rnd() < offsetRate) nd.o = genOffset();
+  if (boxRate > 0 && op.arity && rnd() < boxRate) nd.b = genBox(); // leaves would fade to flat grey outside the box
   return nd;
 }
 function randTree(maxDepth = 4, d = 0) {
@@ -641,6 +683,7 @@ function randTree(maxDepth = 4, d = 0) {
 }
 function jitterConsts(node, amt) {
   const spec = OPS[node.op].k;
+  if (node.b && (!spec.length && !node.o || rnd() < 0.35)) { jitterBox(node.b, amt); return true; }
   if (node.o && (!spec.length || rnd() < 0.35)) { // move the centre
     for (let i = 0; i < 2; i++) node.o[i] = clamp(node.o[i] + gauss() * 0.15 * amt, -1.5, 1.5);
     return true;
@@ -658,8 +701,16 @@ function mutateOnce(t, amt) {
   const e = nodes[randi(nodes.length)];
   const r = rnd();
   if (r < 0.35) { // jitter constants of some node that has them
-    const cands = nodes.filter((x) => x.node.k.length || x.node.o);
+    const cands = nodes.filter((x) => x.node.k.length || x.node.o || x.node.b);
     if (cands.length) { jitterConsts(cands[randi(cands.length)].node, amt); return t; }
+  }
+  if (boxRate > 0 && r < 0.375) { // localize a function to a box, or let a boxed one cover the whole image again
+    const cands = nodes.filter((x) => x.node.a.length);
+    if (cands.length) {
+      const nd = cands[randi(cands.length)].node;
+      if (nd.b && rnd() < 0.3) delete nd.b; else nd.b = genBox();
+      return t;
+    }
   }
   if (offsetRate > 0 && r < 0.40) { // give a centred function an offset, or move one back to the middle
     const cands = nodes.filter((x) => OPS[x.node.op].centred);
@@ -680,6 +731,7 @@ function mutateOnce(t, amt) {
     const nn = makeNode(op, kids);
     if (op.k.length === old.k.length && op.k.every((kind, i) => kind === oldOp.k[i])) nn.k = old.k.slice(); // keep constants only if they mean the same thing
     if (old.o && op.centred) nn.o = old.o.slice(); else if (!op.centred) delete nn.o;
+    if (old.b) nn.b = old.b.slice();
     return replaceAt(t, e, nn);
   }
   if (r < 0.78) { // node becomes an argument to a new function
@@ -718,10 +770,15 @@ function crossover(a, b, maxNodes = 120) {
 // ---------- text form: (op consts... children...) ----------
 function fmtNum(v, prec) { if (Math.abs(v) < 1e-9) return '0'; return String(+v.toPrecision(prec)); }
 // A centre offset is written after the op name: (rings@0.3,-0.25 6.1)  or bare  r@0.3,-0.25
-const opName = (t, prec) => (t.o && OPS[t.op].centred ? t.op + '@' + fmtNum(t.o[0], Math.min(prec, 4)) + ',' + fmtNum(t.o[1], Math.min(prec, 4)) : t.op);
+// A box is written after that: (sin#0.2,-0.4,0.3,0.25,0.08 3.1 0.5 x) = centre, half-width, half-height, softness.
+const opName = (t, prec) => {
+  const p4 = Math.min(prec, 4);
+  return t.op + (t.o && OPS[t.op].centred ? '@' + fmtNum(t.o[0], p4) + ',' + fmtNum(t.o[1], p4) : '') +
+    (t.b ? '#' + t.b.map((v) => fmtNum(v, p4)).join(',') : '');
+};
 function toString(t, prec = 7) {
   const op = OPS[t.op];
-  if (t.op === 'c') return fmtNum(t.k[0], prec);
+  if (t.op === 'c' && !t.b) return fmtNum(t.k[0], prec);
   if (!op.k.length && !t.a.length) return opName(t, prec);
   const parts = [opName(t, prec)];
   op.k.forEach((s, i) => parts.push(s.int ? fmtInt(t.k[i]) : fmtNum(t.k[i], prec)));
@@ -736,11 +793,16 @@ function pretty(t, prec = 3, ind = 0, width = 64) {
   const pad = ' '.repeat(ind + 2);
   return head + t.a.map((c) => '\n' + pad + pretty(c, prec, ind + 2, width)).join('') + ')';
 }
-function splitOff(tok) { // "rings@0.3,-0.2" -> ['rings', [0.3, -0.2]]
-  const at = tok.indexOf('@'); if (at < 0) return [tok, null];
+function splitOff(tok) { // "rings@0.3,-0.2#0,0,.4,.3,.1" -> ['rings', [0.3, -0.2], [0, 0, .4, .3, .1]]
+  let b = null; const hs = tok.indexOf('#');
+  if (hs >= 0) {
+    b = tok.slice(hs + 1).split(',').map(Number); tok = tok.slice(0, hs);
+    if (b.length !== 5 || !b.every(isFinite)) throw new Error('bad box in "' + tok + '"');
+  }
+  const at = tok.indexOf('@'); if (at < 0) return [tok, null, b];
   const xy = tok.slice(at + 1).split(',').map(Number);
   if (xy.length !== 2 || !xy.every(isFinite)) throw new Error('bad offset in "' + tok + '"');
-  return [tok.slice(0, at), xy];
+  return [tok.slice(0, at), xy, b];
 }
 function parse(str) {
   const toks = str.replace(/[()]/g, (m) => ' ' + m + ' ').trim().split(/\s+/);
@@ -750,17 +812,17 @@ function parse(str) {
     const t = toks[p++];
     if (t === undefined) throw new Error('unexpected end');
     if (t === '(') {
-      const [name, o] = splitOff(toks[p++]), op = OPS[name];
+      const [name, o, b] = splitOff(toks[p++]), op = OPS[name];
       if (!op) throw new Error('unknown op "' + name + '"');
       const k = op.k.map(() => num(toks[p++]));
       const a = []; for (let i = 0; i < op.arity; i++) a.push(node());
       if (toks[p++] !== ')') throw new Error('expected ) after ' + name);
-      const nd = { op: name, k, a }; if (o && op.centred) nd.o = o; return nd;
+      const nd = { op: name, k, a }; if (o && op.centred) nd.o = o; if (b) nd.b = b; return nd;
     }
-    const [bare, o] = splitOff(t);
+    const [bare, o, b] = splitOff(t);
     if (OPS[bare]) {
       if (OPS[bare].arity || OPS[bare].k.length) throw new Error('"' + bare + '" needs parentheses');
-      const nd = { op: bare, k: [], a: [] }; if (o && OPS[bare].centred) nd.o = o; return nd;
+      const nd = { op: bare, k: [], a: [] }; if (o && OPS[bare].centred) nd.o = o; if (b) nd.b = b; return nd;
     }
     return { op: 'c', k: [num(t)], a: [] };
   }
@@ -1068,7 +1130,7 @@ class Evolver {
   tour(isl, k = 3) { let b = null; for (let i = 0; i < k; i++) { const p = isl.pop[randi(isl.pop.length)]; if (!b || p.fit < b.fit) b = p; } return b; }
   child(isl) {
     const r = rnd();
-    if (r < this.tune) { const t = clone(isl.best.tree), ns = collect(t).filter((x) => x.node.k.length || x.node.o); if (ns.length) { jitterConsts(ns[randi(ns.length)].node, 0.3); return t; } }
+    if (r < this.tune) { const t = clone(isl.best.tree), ns = collect(t).filter((x) => x.node.k.length || x.node.o || x.node.b); if (ns.length) { jitterConsts(ns[randi(ns.length)].node, 0.3); return t; } }
     if (r < this.tune + 0.3) { const c = crossover(this.tour(isl).tree, this.tour(isl).tree, this.maxNodes); return rnd() < 0.4 ? mutate(c, 0.4, this.maxNodes) : c; }
     if (r < 0.96) return mutate(this.tour(isl).tree, 0.5, this.maxNodes);
     return randomInteresting(5);
@@ -1152,7 +1214,7 @@ class Evolver {
 }
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
-const GP = { setOffsetRate, getOffsetRate, OPS, TERMS, FUNCS, FAMILIES, setEnabled, setFamily, setAllEnabled, enabledNames, evaluate, release, toRGBA, randTree, randomInteresting, mutate, mutants, offspring, crossover, clone, size, depth,
+const GP = { setOffsetRate, getOffsetRate, setBoxRate, getBoxRate, OPS, TERMS, FUNCS, FAMILIES, setEnabled, setFamily, setAllEnabled, enabledNames, evaluate, release, toRGBA, randTree, randomInteresting, mutate, mutants, offspring, crossover, clone, size, depth,
   toString, pretty, parse, signature, sigStd, sigDist, Target, distance, bake, METRICS, DEFAULT_WEIGHTS, Evolver, noise2,
   setRandom: (f) => { rnd = f; }, seedRandom: (s) => { rnd = mulberry32(s); }, useMathRandom: () => { rnd = Math.random; } };
 if (typeof module !== 'undefined' && module.exports) module.exports = GP; else root.GP = GP;
