@@ -762,17 +762,139 @@ function downsample(src, N) { // planar 3ch NxN -> (N/2)x(N/2)
   }
   return o;
 }
-// rgba: Uint8 RGBA NxN. Stores target in display space [0,1] plus a pyramid.
+// ---------- match metrics ----------
+// Each term compares the candidate's displayed image d (planar RGB in [0,1]) with the target.
+// A term is divided by its value for a flat image of the target's mean colour, so 0 = perfect,
+// 1 = no better than a flat image; the match error is the weighted mean of the terms.
+const METRICS = [
+  { id: 'rgb', floor: 1e-4,    name: 'Colour distance', desc: 'per-pixel RGB difference at 4 scales' },
+  { id: 'hue', floor: 2e-3,    name: 'Hue',             desc: 'per-pixel hue difference, weighted by target saturation' },
+  { id: 'sat', floor: 1e-2,    name: 'Saturation',      desc: 'per-pixel HSV saturation difference' },
+  { id: 'val', floor: 1e-3,    name: 'Brightness',      desc: 'per-pixel HSV value difference' },
+  { id: 'edges', floor: 1e-4,  name: 'Edge strength',   desc: 'difference of gradient-magnitude maps at 2 scales' },
+  { id: 'stats', floor: 2e-2,  name: 'Colour statistics', desc: 'per-channel histograms, means and spreads (ignores layout)' },
+  { id: 'ssim', floor: 1e-3,   name: 'Structure (SSIM)', desc: 'local mean/contrast/correlation of brightness, 8px windows' },
+];
+const DEFAULT_WEIGHTS = { rgb: 1, hue: 0, sat: 0, val: 0, edges: 0, stats: 0, ssim: 0 };
+const HB = 16; // histogram bins
+
+function toHSV(d, n) { // planar RGB [0,1] -> {h,s,v} each Float32Array(n), h in [0,1)
+  const h = new Float32Array(n), s = new Float32Array(n), v = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const r = d[i], g = d[i + n], b = d[i + 2 * n], mx = Math.max(r, g, b), mn = Math.min(r, g, b), c = mx - mn;
+    v[i] = mx; s[i] = mx > 1e-6 ? c / mx : 0;
+    let hh = 0;
+    if (c > 1e-6) { if (mx === r) hh = ((g - b) / c) % 6; else if (mx === g) hh = (b - r) / c + 2; else hh = (r - g) / c + 4; hh /= 6; if (hh < 0) hh += 1; }
+    h[i] = hh;
+  }
+  return { h, s, v };
+}
+function lumOf(d, n) { const l = new Float32Array(n); for (let i = 0; i < n; i++) l[i] = 0.299 * d[i] + 0.587 * d[i + n] + 0.114 * d[i + 2 * n]; return l; }
+function edgeMap(l, N) { // gradient magnitude (pixel units) of a single channel
+  const e = new Float32Array(N * N), M = N - 1;
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    const gx = l[y * N + (x < M ? x + 1 : M)] - l[y * N + (x > 0 ? x - 1 : 0)];
+    const gy = l[(y < M ? y + 1 : M) * N + x] - l[(y > 0 ? y - 1 : 0) * N + x];
+    e[y * N + x] = Math.sqrt(gx * gx + gy * gy);
+  }
+  return e;
+}
+function half1(src, N) { const M = N >> 1, o = new Float32Array(M * M); for (let y = 0; y < M; y++) for (let x = 0; x < M; x++) { const i = 2 * y * N + 2 * x; o[y * M + x] = (src[i] + src[i + 1] + src[i + N] + src[i + N + 1]) * 0.25; } return o; }
+function histStats(d, n) { // per channel: soft histogram (HB bins, sums to 1), mean, std
+  const out = [];
+  for (let c = 0; c < 3; c++) {
+    const hst = new Float32Array(HB); let m = 0, q = 0;
+    for (let i = c * n, e = i + n; i < e; i++) {
+      const v = d[i], f = Math.min(HB - 1.0001, Math.max(0, v * HB - 0.5)), k = Math.floor(f), w = f - k;
+      hst[k] += 1 - w; if (k + 1 < HB) hst[k + 1] += w; else hst[k] += w;
+      m += v; q += v * v;
+    }
+    for (let k = 0; k < HB; k++) hst[k] /= n;
+    m /= n; out.push({ hst, m, sd: Math.sqrt(Math.max(0, q / n - m * m)) });
+  }
+  return out;
+}
+function ssimMap(la, lb, N) { // mean SSIM over 8x8 windows with stride 4
+  const C1 = 0.0001, C2 = 0.0009, W = Math.min(8, N), S = Math.max(1, W >> 1);
+  let tot = 0, cnt = 0;
+  for (let y0 = 0; y0 + W <= N; y0 += S) for (let x0 = 0; x0 + W <= N; x0 += S) {
+    let ma = 0, mb = 0, va = 0, vb = 0, cv = 0;
+    for (let y = y0; y < y0 + W; y++) for (let x = x0; x < x0 + W; x++) { const a = la[y * N + x], b = lb[y * N + x]; ma += a; mb += b; va += a * a; vb += b * b; cv += a * b; }
+    const k = 1 / (W * W); ma *= k; mb *= k; va = va * k - ma * ma; vb = vb * k - mb * mb; cv = cv * k - ma * mb;
+    tot += ((2 * ma * mb + C1) * (2 * cv + C2)) / ((ma * ma + mb * mb + C1) * (va + vb + C2)); cnt++;
+  }
+  return cnt ? tot / cnt : 1;
+}
+// Raw (un-normalised) terms for display image d against target T. Only computes terms in `need`.
+function rawTerms(d, T, need) {
+  const N = T.N, n = N * N, out = {};
+  if (need.rgb) {
+    let lv = d, s = N, err = 0;
+    for (let l = 0; l < T.levels.length; l++) {
+      const L = T.levels[l]; let q = 0;
+      for (let i = 0; i < lv.length; i++) { const e = lv[i] - L[i]; q += e * e; }
+      err += q / lv.length;
+      if (l + 1 < T.levels.length) { lv = downsample(lv, s); s >>= 1; }
+    }
+    out.rgb = err / T.levels.length;
+  }
+  if (need.hue || need.sat || need.val) {
+    const c = toHSV(d, n), t = T.hsv; let qh = 0, qs = 0, qv = 0;
+    for (let i = 0; i < n; i++) {
+      let dh = Math.abs(c.h[i] - t.h[i]); if (dh > 0.5) dh = 1 - dh;
+      qh += t.s[i] * t.v[i] * dh * dh; const es = c.s[i] - t.s[i], ev = c.v[i] - t.v[i]; qs += es * es; qv += ev * ev;
+    }
+    out.hue = qh / n; out.sat = qs / n; out.val = qv / n;
+  }
+  if (need.edges || need.ssim) {
+    const l = lumOf(d, n);
+    if (need.edges) {
+      const e0 = edgeMap(l, N), l1 = half1(l, N), e1 = edgeMap(l1, N >> 1); let q0 = 0, q1 = 0;
+      for (let i = 0; i < e0.length; i++) { const e = e0[i] - T.edge0[i]; q0 += e * e; }
+      for (let i = 0; i < e1.length; i++) { const e = e1[i] - T.edge1[i]; q1 += e * e; }
+      out.edges = (q0 / e0.length + q1 / e1.length) / 2;
+    }
+    if (need.ssim) out.ssim = (1 - ssimMap(l, T.lum, N)) / 2;
+  }
+  if (need.stats) {
+    const c = histStats(d, n); let q = 0;
+    for (let k = 0; k < 3; k++) {
+      let h = 0; for (let b = 0; b < HB; b++) h += Math.abs(c[k].hst[b] - T.hist[k].hst[b]);
+      q += h / 2 + Math.abs(c[k].m - T.hist[k].m) + Math.abs(c[k].sd - T.hist[k].sd);
+    }
+    out.stats = q / 3;
+  }
+  return out;
+}
+
+// rgba: Uint8 RGBA NxN. Stores the target in display space [0,1] plus every derived feature.
 class Target {
-  constructor(rgba, N) {
+  constructor(rgba, N, weights) {
     this.N = N; const n = N * N, t = new Float32Array(3 * n);
     for (let i = 0; i < n; i++) for (let c = 0; c < 3; c++) t[c * n + i] = rgba[i * 4 + c] / 255;
     this.levels = [t];
     for (let s = N; s >= 16 && this.levels.length < 4; s >>= 1) this.levels.push(downsample(this.levels[this.levels.length - 1], s));
+    this.hsv = toHSV(t, n); this.lum = lumOf(t, n);
+    this.edge0 = edgeMap(this.lum, N); this.edge1 = edgeMap(half1(this.lum, N), N >> 1);
+    this.hist = histStats(t, n);
+    // baseline: a flat image of the target's mean colour
+    const flat = new Float32Array(3 * n);
+    for (let c = 0; c < 3; c++) { let m = 0; for (let i = 0; i < n; i++) m += t[c * n + i]; flat.fill(m / n, c * n, c * n + n); }
+    const all = {}; for (const m of METRICS) all[m.id] = true;
+    const b = rawTerms(flat, this, all);
+    // floors keep a term meaningful when the flat image already scores ~0 on it (e.g. saturation on a grey target)
+    this.base = {}; for (const m of METRICS) this.base[m.id] = Math.max(b[m.id], m.floor);
+    this.setWeights(weights || DEFAULT_WEIGHTS);
+  }
+  setWeights(w) {
+    this.weights = {}; this.need = {}; let s = 0;
+    for (const m of METRICS) { const v = Math.max(0, +w[m.id] || 0); this.weights[m.id] = v; if (v > 0) { this.need[m.id] = true; s += v; } }
+    if (s === 0) { this.weights.rgb = 1; this.need.rgb = true; s = 1; } // all zero -> plain colour distance
+    this.wsum = s;
   }
 }
 // Distance from tree to target, after the best per-channel affine colour fit (linear scaling).
-// Returns {err, rmse, a, b} where display = clamp((a*v + b + 1)/2).
+// Returns {err, rmse, terms, a, b}: err = weighted mean of normalised terms; rmse = plain RGB RMS error.
 function distance(tree, target) {
   const N = target.N, n = N * N, v = evaluate(tree, N), t = target.levels[0];
   const A = [0, 0, 0], B = [0, 0, 0];
@@ -786,15 +908,11 @@ function distance(tree, target) {
   const d = new Float32Array(3 * n);
   for (let c = 0; c < 3; c++) for (let i = c * n, e = i + n; i < e; i++) d[i] = clamp((A[c] * v[i] + B[c] + 1) * 0.5, 0, 1);
   release(v);
-  let lv = d, s = N, err = 0, rmse = 0;
-  for (let l = 0; l < target.levels.length; l++) {
-    const T = target.levels[l]; let q = 0;
-    for (let i = 0; i < lv.length; i++) { const e = lv[i] - T[i]; q += e * e; }
-    q /= lv.length; if (l === 0) rmse = Math.sqrt(q);
-    err += q;
-    if (l + 1 < target.levels.length) { lv = downsample(lv, s); s >>= 1; }
-  }
-  return { err: err / target.levels.length, rmse, a: A, b: B };
+  let q = 0; for (let i = 0; i < n * 3; i++) { const e = d[i] - t[i]; q += e * e; }
+  const raw = rawTerms(d, target, target.need), terms = {};
+  let err = 0;
+  for (const id in raw) { terms[id] = raw[id] / target.base[id]; err += target.weights[id] * terms[id]; }
+  return { err: err / target.wsum, rmse: Math.sqrt(q / (3 * n)), terms, a: A, b: B };
 }
 // Fold a colour fit into the genome itself: (add (mul T (v a)) (v b)).
 function bake(tree, a, b) {
@@ -817,7 +935,7 @@ class Evolver {
     this.popSize = opts.popSize || 60;
     this.nIslands = Math.max(1, Math.min(opts.islands || 4, Math.floor(this.popSize / 8)));
     this.maxNodes = opts.maxNodes || 80;
-    this.parsimony = opts.parsimony != null ? opts.parsimony : 3e-5;
+    this.parsimony = opts.parsimony != null ? opts.parsimony : 6e-4;
     this.dedupe = opts.dedupe !== false;
     this.tune = opts.tune != null ? opts.tune : 0.12;
     this.migrateEvery = opts.migrateEvery != null ? opts.migrateEvery : 50 * this.popSize; // 0 = never
@@ -835,7 +953,7 @@ class Evolver {
   score(tree) {
     const d = distance(tree, this.target), n = size(tree);
     this.evals++;
-    return { tree, str: toString(tree), err: d.err, rmse: d.rmse, a: d.a, b: d.b, nodes: n, fit: d.err + this.parsimony * n, key: Math.round(d.err * 1e5), isl: -1, sig: null, origin: '' };
+    return { tree, str: toString(tree), err: d.err, rmse: d.rmse, terms: d.terms, a: d.a, b: d.b, nodes: n, fit: d.err + this.parsimony * n, key: Math.round(d.err * 1e5), isl: -1, sig: null, origin: '' };
   }
   seed(trees) {
     let i = 0;
@@ -864,6 +982,15 @@ class Evolver {
     if (b !== this.best) { this.best = b; this.improvements++; }
   }
   updateBest() { this.refreshBest(); }
+  // Re-score everyone after the target's weights change (keeps islands and origins).
+  rescore() {
+    for (const isl of this.islands) {
+      isl.strs = new Set(); isl.keys = new Map();
+      isl.pop = isl.pop.map((p) => { const q = this.score(p.tree); q.isl = p.isl; q.origin = p.origin; q.sig = p.sig; return q; });
+      for (const p of isl.pop) { isl.strs.add(p.str); if (this.dedupe) isl.keys.set(p.key, p); }
+    }
+    this.best = null; this.refreshBest();
+  }
   setParsimony(p) { this.parsimony = p; for (const q of this.all()) q.fit = q.err + p * q.nodes; this.refreshBest(); }
   // Offer a scored child to an island: same-image twin -> keep the smaller; else replace the worst of 4 if better.
   offer(isl, ind) {
@@ -962,7 +1089,7 @@ class Evolver {
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
 const GP = { OPS, TERMS, FUNCS, FAMILIES, setEnabled, setFamily, setAllEnabled, enabledNames, evaluate, release, toRGBA, randTree, randomInteresting, mutate, mutants, offspring, crossover, clone, size, depth,
-  toString, pretty, parse, signature, sigStd, sigDist, Target, distance, bake, Evolver, noise2,
+  toString, pretty, parse, signature, sigStd, sigDist, Target, distance, bake, METRICS, DEFAULT_WEIGHTS, Evolver, noise2,
   setRandom: (f) => { rnd = f; }, seedRandom: (s) => { rnd = mulberry32(s); }, useMathRandom: () => { rnd = Math.random; } };
 if (typeof module !== 'undefined' && module.exports) module.exports = GP; else root.GP = GP;
 })(typeof self !== 'undefined' ? self : this);

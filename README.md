@@ -6,11 +6,18 @@ Open `index.html` through any static server (`python3 -m http.server`), no build
 - **Interactive**: click one of the nine images; it flies to the centre and the other eight become its
   mutants. Click the centre to re-roll its mutants. Back / Backspace undoes. Genomes are Lisp-style
   expressions you can copy, edit, and paste back.
+- **Saving**: Save PNG (512/1024/2048) and Save genome in the large view, Save centre PNG,
+  Save best PNG. Inside claude.ai the page uses the artifact `downloads` capability (you confirm
+  each save); elsewhere a normal download.
 - **Mating**: ♥ any two tiles and press Mate. In interactive mode ♥A moves to the centre and the
   eight around it are crossover children of A and B. In auto-evolve, 16 children are scored and
   offered to the parents' islands.
-- **Auto-evolve**: pick or drop a target image. An island-model steady-state GA minimises multi-scale
-  RMS colour error after a per-channel affine colour fit (baked into the genome):
+- **Auto-evolve**: pick or drop a target image. An island-model steady-state GA minimises a weighted
+  match error, after a per-channel affine colour fit that is baked into the genome. Measures, each
+  divided by the score of a flat image of the target's mean colour (0 = perfect, 1 = flat), weighted
+  by sliders (presets: Colour only, Balanced, Look & feel, Shape): colour distance (RGB, 4 scales),
+  hue (weighted by target saturation), saturation, brightness (HSV value), edge strength (gradient
+  maps, 2 scales), colour statistics (histograms, means, spreads), structure (SSIM).
   - islands evolve separately (tournament selection, subtree crossover, Sims-style mutation,
     constant tuning, size penalty, phenotype dedupe) and pass champions around a ring;
   - every few generations the two most different-looking images among each island's top matches
@@ -42,4 +49,4 @@ Each family, and each function inside it, can be switched off in the sidebar; th
 - **Fractals** (5): `julia`, `mandel`, `juliaw`, `kifs`, `sierp`
 
 Files: `gp.js` (genome, ~50 primitives, mutation, evaluation, GA; runs in Node too),
-`app.js` (UI), `test/core.test.js`, `test/ops.test.js`, `test/bench.js`.
+`app.js` (UI), `test/core.test.js`, `test/ops.test.js`, `test/metrics.test.js`, `test/bench.js`.

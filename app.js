@@ -200,11 +200,35 @@ $('bigParent').onclick = () => {
   drawTree(t, tiles[4].cv); breedFrom(t, true);
 };
 $('bigTarget').onclick = () => { if (!modalTree) return; const t = modalTree; closeModal(); setMode('A'); setTargetFromTree(t, 'Chosen image'); };
-$('bigSave').onclick = () => {
-  if (!modalTree) return;
-  const c = document.createElement('canvas'); c.width = c.height = 1024; drawTree(modalTree, c);
-  c.toBlob((b) => { const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = 'genetic-image.png'; a.click(); toast('If no download starts, right-click the image → Save Image As'); setTimeout(() => URL.revokeObjectURL(a.href), 5000); });
-};
+$('bigSave').onclick = () => modalTree && savePNG(modalTree, +$('bigSize').value);
+$('bigSaveTxt').onclick = () => modalTree && saveFile(new Blob([GP.pretty(modalTree, 6) + '\n'], { type: 'text/plain' }), 'genetic-image-' + stamp() + '.txt');
+
+// ---------- saving files ----------
+// Inside claude.ai the page is sandboxed and plain downloads are blocked; the `downloads`
+// capability asks the viewer to confirm, then saves. Elsewhere (GitHub Pages, local) use a link.
+const dlNs = (window.claude && typeof window.claude.use === 'function') ? window.claude.use('downloads').catch(() => null) : Promise.resolve(null);
+const stamp = () => new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '');
+async function saveFile(blob, name) {
+  const dl = await Promise.race([dlNs, new Promise((r) => setTimeout(() => r(null), 3000))]);
+  if (dl) {
+    try { await dl.save({ filename: name, data: blob }); toast('Saved ' + name); }
+    catch (e) { toast(e && e.code === 'declined' ? 'Save cancelled' : e && e.code === 'rate_limited' ? 'A save prompt is already open' : 'Could not save here: ' + (e && e.code || e)); }
+    return;
+  }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  toast('Saved ' + name);
+}
+function savePNG(tree, size = 1024) {
+  if (!tree) return;
+  toast('Rendering ' + size + '×' + size + '…');
+  setTimeout(() => {
+    const c = document.createElement('canvas'); c.width = c.height = size; drawTree(tree, c);
+    c.toBlob((b) => saveFile(b, 'genetic-image-' + stamp() + '.png'), 'image/png');
+  }, 30);
+}
+$('saveC').onclick = () => savePNG(cells[4], 1024);
+$('saveBest').onclick = () => evo && savePNG(evo.baked(evo.best), 1024);
 
 // ---------- interactive controls ----------
 $('amtv').textContent = amt();
@@ -255,7 +279,7 @@ function rebuildTarget() {
   if (!targetSrc) return;
   const N = +$('res').value, c = document.createElement('canvas'); c.width = c.height = N;
   const g = c.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(targetSrc, 0, 0, N, N);
-  target = new GP.Target(g.getImageData(0, 0, N, N).data, N);
+  target = new GP.Target(g.getImageData(0, 0, N, N).data, N, weights);
 }
 function setTargetFromTree(tree, name) { const c = makeSrcCanvas(); drawTree(tree, c); setTargetCanvas(c, name); }
 function interactiveCenter() { return savedInteractive ? GP.parse(savedInteractive[4]) : cells[4]; }
@@ -312,7 +336,7 @@ function resetEvo() {
   evo = null; lastBest = null; shown.fill('');
   if (!target) { updateStats(); return; }
   const pop = +$('popSize').value;
-  evo = new GP.Evolver(target, { popSize: pop, islands: +$('islands').value, parsimony: +$('pars').value * 1e-5,
+  evo = new GP.Evolver(target, { popSize: pop, islands: +$('islands').value, parsimony: +$('pars').value * PARS_UNIT,
     migrateEvery: +$('migr').value * pop, mateEvery: +$('mateEv').value * pop });
   const seeds = [];
   if ($('seedC').checked) { const c = interactiveCenter(); if (c) { seeds.push(c); seeds.push(...GP.mutants(c, 8, 0.5)); } }
@@ -335,11 +359,12 @@ $('seedC').onchange = () => {};
 $('islands').onchange = resetEvo;
 $('migr').onchange = () => { if (evo) { evo.migrateEvery = +$('migr').value * evo.popSize; evo.nextMigrate = evo.evals + evo.migrateEvery; } };
 $('mateEv').onchange = () => { if (evo) { evo.mateEvery = +$('mateEv').value * evo.popSize; evo.nextMate = evo.evals + evo.mateEvery; } };
-const parsLabel = () => { $('parsv').textContent = (+$('pars').value * 1e-5).toExponential(0) + ' / node'; };
+const PARS_UNIT = 2e-4; // match error is relative to a flat image (1 = flat), so the penalty is per node in those units
+const parsLabel = () => { $('parsv').textContent = (+$('pars').value * PARS_UNIT).toExponential(0) + ' / node'; };
 parsLabel();
 $('pars').oninput = () => {
   parsLabel();
-  if (evo) evo.setParsimony(+$('pars').value * 1e-5);
+  if (evo) evo.setParsimony(+$('pars').value * PARS_UNIT);
 };
 
 function drawBest() {
@@ -368,7 +393,7 @@ function showPopulation(force) {
     const i = order[j], t = tiles[i], baked = evo.baked(p);
     cells[i] = baked; cellInd[i] = p;
     const champ = evo.islands[p.isl] && evo.islands[p.isl].best === p;
-    t.badge.textContent = (j === 0 ? 'best · ' : '') + (evo.nIslands > 1 ? `I${p.isl + 1}${champ ? '★' : ''} ` : '') + p.rmse.toFixed(3) + (ORIGIN_MARK[p.origin] || '');
+    t.badge.textContent = (j === 0 ? 'best · ' : '') + (evo.nIslands > 1 ? `I${p.isl + 1}${champ ? '★' : ''} ` : '') + p.err.toFixed(3) + (ORIGIN_MARK[p.origin] || '');
     t.badge.title = p.origin ? 'came from ' + p.origin : '';
     t.badge.style.display = 'block';
     t.el.style.opacity = '1';
@@ -385,16 +410,53 @@ function updateStats() {
     `target       ${targetName}\n` +
     `evaluations  ${f(evo.evals)}  (${f(evalMark.rate)}/s)\n` +
     `generations  ${f(evo.evals / evo.popSize)}\n` +
-    `best RMSE    ${b.rmse.toFixed(4)}  (${(b.rmse * 100).toFixed(1)}% of range)\n` +
+    `match error  ${b.err.toFixed(4)}  (0 = perfect)\n` +
+    GP.METRICS.filter((m) => target.weights[m.id] > 0).map((m) => `  ${m.name.toLowerCase().padEnd(17)} ${b.terms[m.id].toFixed(3)}  ×${target.weights[m.id]}`).join('\n') + '\n' +
+    `RGB RMSE     ${b.rmse.toFixed(4)}  (${(b.rmse * 100).toFixed(1)}% of range)\n` +
     `best size    ${b.nodes} nodes  (island ${b.isl + 1})\n` +
     `population   ${evo.popSize} at ${target.N}px, ${evo.nIslands} island${evo.nIslands > 1 ? 's' : ''}\n` +
-    (evo.nIslands > 1 ? `island bests ${evo.islands.map((i) => i.best.rmse.toFixed(3)).join(' ')}\n` + `migrations   ${evo.stats.migrations}\n` : '') +
+    (evo.nIslands > 1 ? `island bests ${evo.islands.map((i) => i.best.err.toFixed(3)).join(' ')}\n` + `migrations   ${evo.stats.migrations}\n` : '') +
     `diverse mates ${evo.stats.matings}: kept ${evo.stats.mateKept}/${evo.stats.mateKids} kids, ${evo.stats.mateBest} new best\n` +
     (evo.stats.userMatings ? `your matings  ${evo.stats.userMatings}\n` : '') +
     (evo.stats.last ? `last mating  ${evo.stats.last.kind === 'user' ? '♥ yours' : '⚭ auto'} I${evo.stats.last.a.isl + 1}×I${evo.stats.last.b.isl + 1}, diff ${evo.stats.last.dist.toFixed(3)} → ${evo.stats.last.kept}/${evo.stats.last.kids} kept\n` : '') +
     (running ? '' : '(paused)');
 }
 
+
+
+// ---------- match weights ----------
+const W_PRESETS = {
+  colour:   { rgb: 1, hue: 0, sat: 0, val: 0, edges: 0, stats: 0, ssim: 0 },
+  balanced: { rgb: 1, hue: 0.3, sat: 0.3, val: 0.3, edges: 0.5, stats: 0.3, ssim: 0.5 },
+  feel:     { rgb: 0.2, hue: 0.6, sat: 0.6, val: 0.2, edges: 0.6, stats: 1, ssim: 0 },
+  shape:    { rgb: 0.3, hue: 0, sat: 0, val: 0.5, edges: 1, stats: 0, ssim: 1 },
+};
+let weights = Object.assign({}, GP.DEFAULT_WEIGHTS);
+try { const w = JSON.parse(store.get('gi.weights') || 'null'); if (w) for (const m of GP.METRICS) if (typeof w[m.id] === 'number') weights[m.id] = w[m.id]; } catch (e) { /* defaults */ }
+const wInputs = {};
+(function buildWeights() {
+  const box = $('weights');
+  for (const m of GP.METRICS) {
+    const row = document.createElement('div'); row.className = 'wrow'; row.title = m.desc;
+    const lab = document.createElement('span'); lab.className = 'wname'; lab.textContent = m.name;
+    const r = document.createElement('input'); r.type = 'range'; r.min = 0; r.max = 2; r.step = 0.1; r.value = weights[m.id];
+    const val = document.createElement('span'); val.className = 'wval'; val.textContent = (+r.value).toFixed(1);
+    r.oninput = () => { val.textContent = (+r.value).toFixed(1); weights[m.id] = +r.value; weightsChanged(); };
+    row.append(lab, r, val); box.append(row); wInputs[m.id] = { r, val };
+  }
+})();
+function syncWeightInputs() { for (const m of GP.METRICS) { wInputs[m.id].r.value = weights[m.id]; wInputs[m.id].val.textContent = (+weights[m.id]).toFixed(1); } }
+let wTimer = 0;
+function weightsChanged() {
+  store.set('gi.weights', JSON.stringify(weights));
+  clearTimeout(wTimer);
+  wTimer = setTimeout(() => {
+    if (!target) return;
+    target.setWeights(weights);
+    if (evo) { evo.rescore(); lastBest = null; shown.fill(''); showPopulation(true); drawBest(); updateStats(); }
+  }, 250);
+}
+for (const b of document.querySelectorAll('[data-wpreset]')) b.onclick = () => { weights = Object.assign({}, W_PRESETS[b.dataset.wpreset]); syncWeightInputs(); weightsChanged(); };
 
 // ---------- function families ----------
 function loadOpPrefs() {

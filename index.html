@@ -70,6 +70,10 @@
   .opsl .nm { font: 12px ui-monospace, monospace; color: var(--ink); display: flex; gap: 5px; align-items: center; white-space: nowrap; }
   .opsl .ds { font-size: 11px; color: var(--dim); align-self: center; }
   input[type=checkbox] { accent-color: var(--acc); margin: 0; }
+  .wh { font-size: 13px; margin: 16px 0 4px; }
+  .wrow { display: grid; grid-template-columns: 118px 1fr 30px; align-items: center; gap: 6px; font-size: 12px; }
+  .wrow .wname { color: var(--ink); } .wrow .wval { color: var(--dim); font: 11px ui-monospace, monospace; text-align: right; }
+  .wrow input[type=range] { margin: 2px 0; }
 </style>
 </head>
 <body>
@@ -92,7 +96,7 @@
     </div>
     <label>Centre genome (editable)</label>
     <textarea id="geno" spellcheck="false"></textarea>
-    <div class="row"><button id="apply">Use this genome</button><button id="copy">Copy</button></div>
+    <div class="row"><button id="apply">Use this genome</button><button id="copy">Copy</button><button id="saveC">Save centre PNG</button></div>
   </section>
 
   <section id="paneA" class="hidden">
@@ -118,7 +122,12 @@
     <div class="row">
       <button id="run" style="flex:1">▶ Start</button>
       <button id="reset">Reset population</button>
+      <button id="saveBest">Save best PNG</button>
     </div>
+    <h3 class="wh">Match weights</h3>
+    <div class="help" style="margin-top:0">Each measure is scored relative to a flat image of the target's average colour (0 = perfect, 1 = no better than flat); the match error is their weighted mean. Changing weights re-scores the whole population.</div>
+    <div class="row"><button data-wpreset="colour">Colour only</button><button data-wpreset="balanced">Balanced</button><button data-wpreset="feel">Look &amp; feel</button><button data-wpreset="shape">Shape</button></div>
+    <div id="weights"></div>
     <div class="row">
       <label style="flex:1">Population <select id="popSize"><option>40</option><option>80</option><option selected>150</option><option>300</option></select></label>
       <label style="flex:1">Resolution <select id="res"><option>32</option><option selected>48</option><option>64</option></select></label>
@@ -152,7 +161,9 @@
       <button id="bigTarget">Use as target</button>
     </div>
     <div class="row">
-      <button id="bigSave">Save PNG (1024)</button>
+      <select id="bigSize"><option value="1024">1024 px</option><option value="2048">2048 px</option><option value="512">512 px</option></select>
+      <button id="bigSave">Save PNG</button>
+      <button id="bigSaveTxt">Save genome</button>
       <button id="bigCopy">Copy genome</button>
       <button id="bigClose">Close (Esc)</button>
     </div>
