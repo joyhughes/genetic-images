@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Genetic Images</title>
+<style>
+  :root { --bg: #111214; --panel: #1b1d21; --line: #2c2f35; --ink: #e8e6e1; --dim: #9a9890; --acc: #e0b050; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 14px/1.4 system-ui, -apple-system, sans-serif; }
+  body { display: flex; overflow: hidden; }
+  #stage { flex: 1; display: flex; align-items: center; justify-content: center; position: relative; min-width: 0; }
+  #grid { display: grid; grid-template-columns: repeat(3, var(--tile)); grid-template-rows: repeat(3, var(--tile)); gap: 12px; }
+  .tile { position: relative; width: var(--tile); height: var(--tile); border-radius: 6px; overflow: hidden; background: #000; cursor: pointer;
+          box-shadow: 0 0 0 1px var(--line); transition: box-shadow .15s; }
+  .tile:hover { box-shadow: 0 0 0 2px var(--acc); }
+  .tile.center { box-shadow: 0 0 0 2px #fff6; }
+  .tile canvas { width: 100%; height: 100%; display: block; image-rendering: auto; }
+  .tile .zoom { position: absolute; right: 6px; top: 6px; width: 26px; height: 26px; border-radius: 13px; border: 0; background: #000a; color: #fff;
+                font-size: 14px; cursor: zoom-in; opacity: 0; transition: opacity .15s; }
+  .tile:hover .zoom { opacity: 1; }
+  .tile .badge { position: absolute; left: 6px; bottom: 6px; font: 11px ui-monospace, monospace; background: #000a; padding: 1px 5px; border-radius: 3px; display: none; }
+  .tile.pending canvas { opacity: .25; }
+  .fly { position: fixed; z-index: 10; border-radius: 6px; pointer-events: none; transition: transform .45s cubic-bezier(.5,0,.2,1); }
+  aside { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 16px 18px; }
+  h1 { font-size: 18px; margin: 0 0 2px; letter-spacing: .02em; }
+  .sub { color: var(--dim); font-size: 12px; margin-bottom: 14px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 14px; }
+  .tabs button { flex: 1; }
+  .tabs button.on { background: var(--acc); color: #111; border-color: var(--acc); }
+  button, select, input[type=file]::file-selector-button { background: #262930; color: var(--ink); border: 1px solid var(--line); border-radius: 5px; padding: 6px 10px; font: inherit; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: #555; }
+  button:disabled { opacity: .4; cursor: default; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; align-items: center; }
+  label { color: var(--dim); font-size: 12px; }
+  input[type=range] { width: 100%; accent-color: var(--acc); }
+  textarea { width: 100%; height: 150px; background: #0d0e10; color: #cfe3c8; border: 1px solid var(--line); border-radius: 5px; font: 11px/1.35 ui-monospace, monospace; padding: 8px; resize: vertical; }
+  .help { color: var(--dim); font-size: 12px; margin: 10px 0; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .pair figure { margin: 0; }
+  .pair canvas { width: 100%; aspect-ratio: 1; border-radius: 5px; background: #000; display: block; box-shadow: 0 0 0 1px var(--line); }
+  .pair figcaption { color: var(--dim); font-size: 11px; margin-top: 3px; }
+  .stats { font: 12px ui-monospace, monospace; color: var(--ink); background: #0d0e10; border-radius: 5px; padding: 8px; margin: 10px 0; white-space: pre; }
+  #drop { border: 1px dashed #444; border-radius: 6px; padding: 8px; text-align: center; color: var(--dim); font-size: 12px; }
+  #drop.over { border-color: var(--acc); color: var(--acc); }
+  .hidden { display: none !important; }
+  #modal { position: fixed; inset: 0; background: #000c; z-index: 20; display: flex; align-items: center; justify-content: center; gap: 20px; padding: 24px; }
+  #modal canvas { width: min(80vh, 60vw); height: min(80vh, 60vw); border-radius: 6px; background: #000; }
+  #modal .side { width: 340px; display: flex; flex-direction: column; gap: 8px; max-height: 80vh; }
+  #modal textarea { flex: 1; height: auto; min-height: 200px; }
+  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #333; padding: 6px 14px; border-radius: 5px; z-index: 30; opacity: 0; transition: opacity .3s; pointer-events: none; }
+  #toast.on { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="stage"><div id="grid"></div></div>
+<aside>
+  <h1>Genetic Images</h1>
+  <div class="sub">Expression-tree evolution after Karl Sims, 1991</div>
+  <div class="tabs"><button id="tabI" class="on">Interactive</button><button id="tabA">Auto-evolve</button></div>
+
+  <section id="paneI">
+    <div class="help">Click any image: it moves to the centre and the other eight become its mutants. Click the centre to mutate again. ⤢ opens a large view.</div>
+    <label>Mutation amount <span id="amtv"></span></label>
+    <input id="amt" type="range" min="0.05" max="1" step="0.05" value="0.5">
+    <div class="row">
+      <button id="back" title="Backspace">← Back</button>
+      <button id="rand">New random 9</button>
+      <button id="bigC">⤢ Centre</button>
+    </div>
+    <label>Centre genome (editable)</label>
+    <textarea id="geno" spellcheck="false"></textarea>
+    <div class="row"><button id="apply">Use this genome</button><button id="copy">Copy</button></div>
+  </section>
+
+  <section id="paneA" class="hidden">
+    <div class="help">Evolves a population to minimise distance to the target (multi-scale RMS colour error, after a best-fit colour scale per channel). The grid shows the best nine; click one to take it back to interactive breeding.</div>
+    <div class="pair">
+      <figure><canvas id="tgtC" width="160" height="160"></canvas><figcaption>Target</figcaption></figure>
+      <figure><canvas id="bestC" width="160" height="160"></canvas><figcaption>Best so far</figcaption></figure>
+    </div>
+    <div class="row">
+      <select id="preset">
+        <option value="">Target…</option>
+        <option value="sunset">Sunset</option>
+        <option value="rings">Rings</option>
+        <option value="letter">Letter K</option>
+        <option value="flower">Flower emoji</option>
+        <option value="genome">Hidden random genome</option>
+        <option value="center">Current centre image</option>
+      </select>
+      <input id="file" type="file" accept="image/*" class="hidden">
+      <button id="upload">Upload image…</button>
+    </div>
+    <div id="drop">or drop an image here</div>
+    <div class="row">
+      <button id="run" style="flex:1">▶ Start</button>
+      <button id="reset">Reset population</button>
+    </div>
+    <div class="row">
+      <label style="flex:1">Population <select id="popSize"><option>40</option><option>80</option><option selected>150</option><option>300</option></select></label>
+      <label style="flex:1">Resolution <select id="res"><option>32</option><option selected>48</option><option>64</option></select></label>
+    </div>
+    <label>Size penalty <span id="parsv"></span></label>
+    <input id="pars" type="range" min="0" max="20" step="1" value="3">
+    <label><input id="seedC" type="checkbox" checked> Seed population with the interactive centre</label>
+    <div class="stats" id="stats">no target yet</div>
+  </section>
+</aside>
+
+<div id="modal" class="hidden">
+  <canvas id="bigCanvas" width="768" height="768"></canvas>
+  <div class="side">
+    <textarea id="bigGeno" spellcheck="false" readonly></textarea>
+    <div class="row">
+      <button id="bigParent">Make parent</button>
+      <button id="bigTarget">Use as target</button>
+    </div>
+    <div class="row">
+      <button id="bigSave">Save PNG (1024)</button>
+      <button id="bigCopy">Copy genome</button>
+      <button id="bigClose">Close (Esc)</button>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+<script src="gp.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
