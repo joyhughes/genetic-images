@@ -324,6 +324,56 @@ function updateStats() {
     `population   ${evo.popSize} at ${target.N}px` + (running ? '' : '\n(paused)');
 }
 
+
+// ---------- function families ----------
+function loadOpPrefs() {
+  try { const off = JSON.parse(store.get('gi.off') || '[]'); GP.setAllEnabled(true); for (const n of off) GP.setEnabled(n, false); } catch (e) { GP.setAllEnabled(true); }
+}
+function saveOpPrefs() { store.set('gi.off', JSON.stringify(Object.keys(GP.OPS).filter((n) => !GP.OPS[n].on))); }
+function buildFamilies() {
+  const list = $('famList'); list.textContent = '';
+  for (const f of GP.FAMILIES) {
+    const box = document.createElement('div'); box.className = 'fam';
+    const row = document.createElement('div'); row.className = 'famrow';
+    const lab = document.createElement('label'), cb = document.createElement('input'); cb.type = 'checkbox'; cb.dataset.fam = f.id;
+    lab.append(cb, document.createTextNode(f.name));
+    const count = document.createElement('span'); count.className = 'count';
+    const more = document.createElement('button'); more.className = 'more'; more.textContent = '▸'; more.title = 'Show functions';
+    row.append(lab, count, more);
+    const ops = document.createElement('div'); ops.className = 'opsl hidden';
+    for (const name of f.ops) {
+      const op = GP.OPS[name], l = document.createElement('label'), nm = document.createElement('span'), ds = document.createElement('span');
+      const c = document.createElement('input'); c.type = 'checkbox'; c.dataset.op = name;
+      nm.className = 'nm'; nm.append(c, document.createTextNode(name));
+      ds.className = 'ds'; ds.textContent = op.desc + (op.arity ? ` · ${op.arity} arg${op.arity > 1 ? 's' : ''}` : '');
+      l.append(nm, ds); ops.append(l);
+      c.onchange = () => { GP.setEnabled(name, c.checked); saveOpPrefs(); syncFamilies(); };
+    }
+    cb.onchange = () => { GP.setFamily(f.id, cb.checked); saveOpPrefs(); syncFamilies(); };
+    more.onclick = () => { const open = ops.classList.toggle('hidden'); more.textContent = open ? '▸' : '▾'; };
+    box.append(row, ops); list.append(box);
+    box._sync = () => {
+      const on = f.ops.filter((n) => GP.OPS[n].on).length;
+      cb.checked = on === f.ops.length; cb.indeterminate = on > 0 && on < f.ops.length;
+      count.textContent = on + '/' + f.ops.length;
+      for (const c of ops.querySelectorAll('input')) c.checked = GP.OPS[c.dataset.op].on;
+    };
+  }
+  syncFamilies();
+}
+function syncFamilies() {
+  for (const b of $('famList').children) b._sync();
+  const on = GP.enabledNames().length, all = Object.keys(GP.OPS).length;
+  $('famTotal').textContent = `${on} of ${all} on`;
+  const leaves = GP.TERMS.some((o) => o.on), fns = GP.FUNCS.some((o) => o.on);
+  if (!leaves || !fns) toast(!leaves ? 'No leaf functions on: using x and y' : 'No functions with arguments on: images will be very simple');
+}
+$('famAll').onclick = () => { GP.setAllEnabled(true); saveOpPrefs(); syncFamilies(); };
+$('famNone').onclick = () => { GP.setAllEnabled(false); saveOpPrefs(); syncFamilies(); };
+$('famReroll').onclick = () => { if (mode === 'A') { stopAuto(); setMode('I', true); } randomNine(); };
+loadOpPrefs();
+buildFamilies();
+
 // ---------- main loop ----------
 function frame() {
   const t0 = performance.now();

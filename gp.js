@@ -26,11 +26,12 @@ const pool = new Pool();
 // ---------- noise ----------
 const GX = new Float32Array(256), GY = new Float32Array(256);
 for (let i = 0; i < 256; i++) { const t = i * Math.PI * 2 / 256 + 0.1; GX[i] = Math.cos(t); GY[i] = Math.sin(t); }
-function hash(x, y, s) {
+function hash32(x, y, s) {
   let h = (Math.imul(x, 0x27d4eb2d) ^ Math.imul(y, 0x165667b1) ^ Math.imul(s, 0x9e3779b1)) | 0;
   h = Math.imul(h ^ (h >>> 15), 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16;
-  return h & 255;
+  return h;
 }
+const hash = (x, y, s) => hash32(x, y, s) & 255;
 function noise2(x, y, s) {
   const x0 = Math.floor(x), y0 = Math.floor(y), xi = x0 | 0, yi = y0 | 0, fx = x - x0, fy = y - y0;
   const g00 = hash(xi, yi, s), g10 = hash(xi + 1, yi, s), g01 = hash(xi, yi + 1, s), g11 = hash(xi + 1, yi + 1, s);
@@ -55,12 +56,17 @@ const K = {
   warpk:  { gen: () => rand(-0.8, 0.8),                              mut: (v, a) => v + gauss() * 0.2 * a },
   levels: { gen: () => 2 + randi(7), int: true,                      mut: (v, a) => Math.min(16, Math.max(2, Math.round(v + gauss() * 2 * a))) },
   segs:   { gen: () => 2 + randi(9), int: true,                      mut: (v, a) => Math.min(16, Math.max(2, Math.round(v + gauss() * 2 * a))) },
+  iters:  { gen: () => 8 + randi(25), int: true,                     mut: (v, a) => Math.min(48, Math.max(4, Math.round(v + gauss() * 4 * a))) },
+  depth:  { gen: () => 2 + randi(4), int: true,                      mut: (v, a) => Math.min(7, Math.max(1, Math.round(v + gauss() * a))) },
+  chan:   { gen: () => randi(3), int: true,                          mut: (v, a) => (rnd() < 0.5 * a ? randi(3) : v) },
+  perm:   { gen: () => randi(6), int: true,                          mut: (v, a) => (rnd() < 0.5 * a ? randi(6) : v) },
+  blocks: { gen: () => Math.exp(rand(Math.log(3), Math.log(40))),   mut: (v, a) => Math.min(80, Math.max(1.5, v * Math.exp(gauss() * 0.3 * a))) },
 };
 
 // ---------- ops ----------
 const OPS = {};
 const TERMS = [], FUNCS = [];
-function def(name, arity, k, w, ev) { const op = { name, arity, k: k || [], w, ev }; OPS[name] = op; (arity ? FUNCS : TERMS).push(op); }
+function def(name, arity, k, w, ev) { const op = { name, arity, k: k || [], w, ev, on: true, fam: null }; OPS[name] = op; (arity ? FUNCS : TERMS).push(op); }
 const E = (ctx, node, X, Y) => OPS[node.op].ev(ctx, node, X, Y);
 
 function lum(ctx, b) {
@@ -244,6 +250,318 @@ def('wrel', 3, [K.warpk], 0.8, (ctx, nd, X, Y) => {
   const r = E(ctx, nd.a[0], u, v); pool.put(u); pool.put(v); return r;
 });
 
+// ======================================================================
+// Expanded primitive set
+// ======================================================================
+const hashf = (x, y, s) => (hash32(x, y, s) >>> 0) / 4294967296;
+const to01 = (a) => (a + 1) * 0.5, from01 = (a) => a * 2 - 1;
+const PI = Math.PI;
+function term1(f) { // single-channel terminal from coordinates
+  return (ctx, nd, X, Y) => { const n = ctx.n, o = pool.get(3 * n), k = nd.k; for (let i = 0; i < n; i++) o[i] = o[i + n] = o[i + 2 * n] = f(X[i], Y[i], k); return o; };
+}
+
+// --- coordinates ---
+def('l1', 0, [], 0.6, term1((x, y) => Math.abs(x) + Math.abs(y) - 1));
+def('linf', 0, [], 0.6, term1((x, y) => Math.max(Math.abs(x), Math.abs(y)) * 2 - 1));
+def('grad', 0, [K.angle], 0.8, term1((x, y, k) => x * Math.cos(k[0]) + y * Math.sin(k[0])));
+
+// --- patterns ---
+def('checker', 0, [K.freq], 0.5, term1((x, y, k) => (((Math.floor(x * k[0]) + Math.floor(y * k[0])) & 1) ? 1 : -1)));
+def('stripes', 0, [K.freq, K.angle], 0.6, term1((x, y, k) => Math.sin((x * Math.cos(k[1]) + y * Math.sin(k[1])) * k[0] * PI)));
+def('rings', 0, [K.freq], 0.6, term1((x, y, k) => Math.sin(Math.sqrt(x * x + y * y) * k[0] * PI)));
+def('dots', 0, [K.freq, K.unit], 0.5, term1((x, y, k) => {
+  const u = fract(x * k[0] * 0.5) - 0.5, v = fract(y * k[0] * 0.5) - 0.5, rad = 0.12 + 0.18 * (k[1] + 1);
+  return Math.sqrt(u * u + v * v) < rad ? 1 : -1;
+}));
+def('spiral', 0, [K.segs, K.freq], 0.5, term1((x, y, k) => Math.sin(Math.atan2(y, x) * Math.round(k[0]) + Math.sqrt(x * x + y * y) * k[1] * PI)));
+def('star', 0, [K.segs, K.unit], 0.4, term1((x, y, k) => {
+  const r = Math.sqrt(x * x + y * y), e = 0.5 + 0.25 * (k[1] + 1) * 0.5 * Math.cos(Math.atan2(y, x) * Math.round(k[0]));
+  return Math.tanh((e - r) * 12);
+}));
+def('hexgrid', 0, [K.freq], 0.4, term1((x, y, k) => {
+  const px = x * k[0], py = y * k[0], rx = 1, ry = 1.7320508, hx = 0.5, hy = 0.8660254;
+  const ax = px - rx * Math.floor(px / rx) - hx, ay = py - ry * Math.floor(py / ry) - hy;
+  const bx = (px - hx) - rx * Math.floor((px - hx) / rx) - hx, by = (py - hy) - ry * Math.floor((py - hy) / ry) - hy;
+  const gx = ax * ax + ay * ay < bx * bx + by * by ? ax : bx, gy = ax * ax + ay * ay < bx * bx + by * by ? ay : by;
+  const d = Math.max(Math.abs(gx) * 0.5 + Math.abs(gy) * 0.8660254, Math.abs(gx));
+  return 1 - 4 * d;
+}));
+def('eggcrate', 0, [K.freq], 0.5, term1((x, y, k) => Math.sin(x * k[0] * PI) * Math.sin(y * k[0] * PI)));
+def('bricks', 0, [K.freq], 0.4, term1((x, y, k) => {
+  const yy = y * k[0], row = Math.floor(yy), xx = x * k[0] * 0.5 + row * 0.5;
+  const fx = fract(xx), fy = yy - row;
+  return Math.min(fx, 1 - fx) * 2 < 0.08 || Math.min(fy, 1 - fy) < 0.06 ? -1 : 1;
+}));
+
+// --- noise ---
+let C_D1 = 0, C_D2 = 0, C_BX = 0, C_BY = 0;
+function cellular(x, y, s) {
+  const x0 = Math.floor(x), y0 = Math.floor(y); C_D1 = 9; C_D2 = 9;
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const cx = (x0 + dx) | 0, cy = (y0 + dy) | 0, px = cx + hashf(cx, cy, s) - x, py = cy + hashf(cx, cy, s + 17) - y, d = px * px + py * py;
+    if (d < C_D1) { C_D2 = C_D1; C_D1 = d; C_BX = cx; C_BY = cy; } else if (d < C_D2) C_D2 = d;
+  }
+}
+def('ridged', 0, [K.freq, K.seed], 0.6, term1((x, y, k) => {
+  let t = 0, a = 1, f = k[0]; const s = k[1] | 0;
+  for (let o = 0; o < 4; o++) { const v = 1 - Math.abs(noise2(x * f, y * f, s + o * 101)); t += a * v * v; a *= 0.5; f *= 2.03; }
+  return t * 1.1 - 1;
+}));
+def('turb', 0, [K.freq, K.seed], 0.6, term1((x, y, k) => {
+  let t = 0, a = 1, f = k[0]; const s = k[1] | 0;
+  for (let o = 0; o < 4; o++) { t += a * Math.abs(noise2(x * f, y * f, s + o * 101)); a *= 0.5; f *= 2.03; }
+  return t * 1.3 - 1;
+}));
+def('cells', 0, [K.freq, K.seed], 0.6, term1((x, y, k) => { cellular(x * k[0], y * k[0], k[1] | 0); return Math.sqrt(C_D1) * 2 - 1; }));
+def('cracks', 0, [K.freq, K.seed], 0.5, term1((x, y, k) => { cellular(x * k[0], y * k[0], k[1] | 0); return 1 - 2 * clamp((Math.sqrt(C_D2) - Math.sqrt(C_D1)) * 3, 0, 1); }));
+def('ccells', 0, [K.freq, K.seed], 0.6, (ctx, nd, X, Y) => {
+  const n = ctx.n, o = pool.get(3 * n), f = nd.k[0], s = nd.k[1] | 0;
+  for (let i = 0; i < n; i++) { cellular(X[i] * f, Y[i] * f, s); for (let c = 0; c < 3; c++) o[i + c * n] = hashf(C_BX, C_BY, s + 31 * (c + 1)) * 2 - 1; }
+  return o;
+});
+def('wcells', 2, [K.freq, K.seed], 0.4, (ctx, nd, X, Y) => {
+  const n = ctx.n, ua = E(ctx, nd.a[0], X, Y), u = lum(ctx, ua); pool.put(ua);
+  const va = E(ctx, nd.a[1], X, Y), v = lum(ctx, va); pool.put(va);
+  const o = pool.get(3 * n), f = nd.k[0], s = nd.k[1] | 0;
+  for (let i = 0; i < n; i++) { cellular(u[i] * f, v[i] * f, s); o[i] = o[i + n] = o[i + 2 * n] = Math.sqrt(C_D1) * 2 - 1; }
+  pool.put(u); pool.put(v); return o;
+});
+
+// --- arithmetic ---
+def('avg', 2, [], 0.5, pw2((a, b) => (a + b) * 0.5));
+def('absdiff', 2, [], 0.4, pw2((a, b) => Math.abs(a - b)));
+def('hypot', 2, [], 0.4, pw2((a, b) => Math.sqrt(a * a + b * b)));
+
+// --- periodic & shaping ---
+def('tri', 1, [K.freq], 0.6, pw1((a, k) => 4 * Math.abs(fract(a * k[0] * 0.5 + 0.25) - 0.5) - 1));
+def('saw', 1, [K.freq], 0.5, pw1((a, k) => fract(a * k[0] * 0.5) * 2 - 1));
+def('sqwave', 1, [K.freq], 0.4, pw1((a, k) => (fract(a * k[0] * 0.5) < 0.5 ? 1 : -1)));
+def('smooth', 1, [], 0.4, pw1((a) => { const s = clamp(to01(a), 0, 1); return from01(s * s * (3 - 2 * s)); }));
+def('fold', 1, [], 0.4, pw1((a) => { const v = fract((a + 1) / 4) * 4; return v < 2 ? v - 1 : 3 - v; }));
+def('clamp', 1, [], 0.3, pw1((a) => clamp(a, -1, 1)));
+
+// --- powers & logs ---
+def('cube', 1, [], 0.2, pw1((a) => a * a * a));
+def('recip', 1, [], 0.2, pw1((a) => 1 / (Math.abs(a) < 1e-2 ? (a < 0 ? -1e-2 : 1e-2) : a)));
+def('gamma', 1, [K.gain], 0.4, pw1((a, k) => (a < 0 ? -1 : 1) * Math.pow(Math.abs(a), k[0])));
+
+// --- logic & quantize ---
+def('step', 1, [K.unit], 0.4, pw1((a, k) => (a > k[0] ? 1 : -1)));
+def('gt', 2, [], 0.4, pw2((a, b) => (a > b ? 1 : -1)));
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map((v) => (v + 0.5) / 16);
+def('dither', 1, [K.levels], 0.4, (ctx, nd, X, Y) => {
+  const a = E(ctx, nd.a[0], X, Y), N = ctx.N, n = ctx.n, L = nd.k[0];
+  for (let c = 0; c < 3; c++) for (let i = 0; i < n; i++) { const t = BAYER[((i / N | 0) & 3) * 4 + ((i % N) & 3)]; a[i + c * n] = Math.floor(to01(a[i + c * n]) * L + t) / L * 2 - 1; }
+  return a;
+});
+
+// --- colour ---
+def('hue', 1, [K.angle], 0.6, (ctx, nd, X, Y) => {
+  const a = E(ctx, nd.a[0], X, Y), n = ctx.n, c = Math.cos(nd.k[0]), s = Math.sin(nd.k[0]), q = 1 / Math.sqrt(3), w = (1 - c) / 3;
+  for (let i = 0; i < n; i++) {
+    const r = a[i], g = a[i + n], b = a[i + 2 * n], d = (r + g + b) * w;
+    a[i] = r * c + (g * q * -1 + b * q) * -s + d;      // Rodrigues rotation about the grey axis
+    a[i + n] = g * c + (r * q - b * q) * -s + d;
+    a[i + 2 * n] = b * c + (g * q - r * q) * -s + d;
+  }
+  return a;
+});
+def('sat', 1, [K.gain], 0.5, (ctx, nd, X, Y) => {
+  const a = E(ctx, nd.a[0], X, Y), n = ctx.n, k = nd.k[0];
+  for (let i = 0; i < n; i++) { const m = (a[i] + a[i + n] + a[i + 2 * n]) / 3; for (let c = 0; c < 3; c++) a[i + c * n] = m + (a[i + c * n] - m) * k; }
+  return a;
+});
+def('chan', 1, [K.chan], 0.3, (ctx, nd, X, Y) => { const a = E(ctx, nd.a[0], X, Y), n = ctx.n, c = clamp(Math.round(nd.k[0]), 0, 2); const ch = a.slice(c * n, c * n + n); a.set(ch, 0); a.set(ch, n); a.set(ch, 2 * n); return a; });
+const PERMS = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+def('swap', 1, [K.perm], 0.4, (ctx, nd, X, Y) => {
+  const a = E(ctx, nd.a[0], X, Y), n = ctx.n, p = PERMS[clamp(Math.round(nd.k[0]), 0, 5)], o = pool.get(3 * n);
+  for (let c = 0; c < 3; c++) o.set(a.subarray(p[c] * n, p[c] * n + n), c * n);
+  pool.put(a); return o;
+});
+def('palette', 1, [K.unit, K.unit, K.unit], 0.7, (ctx, nd, X, Y) => {
+  const a = E(ctx, nd.a[0], X, Y), n = ctx.n, l = lum(ctx, a), k = nd.k;
+  for (let c = 0; c < 3; c++) for (let i = 0; i < n; i++) a[i + c * n] = Math.cos(PI * (l[i] + k[c] * 2));
+  pool.put(l); return a;
+});
+def('sepia', 1, [], 0.3, (ctx, nd, X, Y) => {
+  const a = E(ctx, nd.a[0], X, Y), n = ctx.n;
+  for (let i = 0; i < n; i++) { const l = to01((a[i] + a[i + n] + a[i + 2 * n]) / 3); a[i] = from01(clamp(l * 1.15, 0, 1)); a[i + n] = from01(l * 0.95); a[i + 2 * n] = from01(l * 0.7); }
+  return a;
+});
+
+// --- blending (operands treated as [0,1] layers) ---
+const blend = (f) => pw2((a, b) => from01(clamp(f(clamp(to01(a), 0, 1), clamp(to01(b), 0, 1)), 0, 1)));
+def('screen', 2, [], 0.4, blend((A, B) => 1 - (1 - A) * (1 - B)));
+def('overlay', 2, [], 0.4, blend((A, B) => (A < 0.5 ? 2 * A * B : 1 - 2 * (1 - A) * (1 - B))));
+def('dodge', 2, [], 0.3, blend((A, B) => B / Math.max(1e-3, 1 - A)));
+def('burn', 2, [], 0.3, blend((A, B) => 1 - (1 - B) / Math.max(1e-3, A)));
+def('mask', 3, [K.unit], 0.4, (ctx, nd, X, Y) => { // hard-edged lerp: t > threshold picks b
+  const ta = E(ctx, nd.a[2], X, Y), t = lum(ctx, ta); pool.put(ta);
+  const a = E(ctx, nd.a[0], X, Y), b = E(ctx, nd.a[1], X, Y), n = ctx.n, th = nd.k[0];
+  for (let c = 0; c < 3; c++) for (let i = 0; i < n; i++) { const w = clamp((t[i] - th) * 6 + 0.5, 0, 1); a[i + c * n] += (b[i + c * n] - a[i + c * n]) * w; }
+  pool.put(b); pool.put(t); return a;
+});
+
+// --- coordinate transforms ---
+def('zoom', 1, [K.scale], 0.4, coordOp((k, X, Y, X2, Y2, n) => { for (let i = 0; i < n; i++) { X2[i] = X[i] * k[0]; Y2[i] = Y[i] * k[0]; } }));
+def('shear', 1, [K.unit], 0.3, coordOp((k, X, Y, X2, Y2, n) => { for (let i = 0; i < n; i++) { X2[i] = X[i] + k[0] * Y[i]; Y2[i] = Y[i]; } }));
+def('mirror', 1, [K.chan], 0.4, coordOp((k, X, Y, X2, Y2, n) => { const m = Math.round(k[0]); for (let i = 0; i < n; i++) { X2[i] = m !== 1 ? Math.abs(X[i]) : X[i]; Y2[i] = m !== 0 ? Math.abs(Y[i]) : Y[i]; } }));
+def('brick', 1, [K.gain], 0.3, coordOp((k, X, Y, X2, Y2, n) => {
+  const s = k[0];
+  for (let i = 0; i < n; i++) { const yy = (Y[i] * s + 1) / 2, row = Math.floor(yy); X2[i] = fract((X[i] * s + 1) / 2 + row * 0.5) * 2 - 1; Y2[i] = (yy - row) * 2 - 1; }
+}));
+def('pixel', 1, [K.blocks], 0.4, coordOp((k, X, Y, X2, Y2, n) => { const s = k[0]; for (let i = 0; i < n; i++) { X2[i] = (Math.floor(X[i] * s) + 0.5) / s; Y2[i] = (Math.floor(Y[i] * s) + 0.5) / s; } }));
+def('unpolar', 1, [], 0.3, coordOp((k, X, Y, X2, Y2, n) => { for (let i = 0; i < n; i++) { const t = X[i] * PI, r = (Y[i] + 1) * 0.5; X2[i] = r * Math.cos(t); Y2[i] = r * Math.sin(t); } }));
+def('fisheye', 1, [K.unit], 0.4, coordOp((k, X, Y, X2, Y2, n) => { const s = k[0] * 1.5; for (let i = 0; i < n; i++) { const f = 1 + s * (X[i] * X[i] + Y[i] * Y[i]); X2[i] = X[i] * f; Y2[i] = Y[i] * f; } }));
+def('pinch', 1, [K.unit], 0.3, coordOp((k, X, Y, X2, Y2, n) => { for (let i = 0; i < n; i++) { const f = Math.pow(Math.sqrt(X[i] * X[i] + Y[i] * Y[i]) + 1e-3, k[0]); X2[i] = X[i] * f; Y2[i] = Y[i] * f; } }));
+def('ripple', 1, [K.freq, K.unit], 0.5, coordOp((k, X, Y, X2, Y2, n) => { const f = k[0] * PI, a = k[1] * 0.2; for (let i = 0; i < n; i++) { X2[i] = X[i] + a * Math.sin(Y[i] * f); Y2[i] = Y[i] + a * Math.sin(X[i] * f); } }));
+def('cinv', 1, [K.scale], 0.3, coordOp((k, X, Y, X2, Y2, n) => { const s = k[0] * k[0]; for (let i = 0; i < n; i++) { const d = X[i] * X[i] + Y[i] * Y[i] + 1e-3; X2[i] = X[i] * s / d; Y2[i] = Y[i] * s / d; } }));
+def('wave', 1, [K.freq, K.unit], 0.4, coordOp((k, X, Y, X2, Y2, n) => { const f = k[0] * PI, a = k[1] * 0.25; for (let i = 0; i < n; i++) { X2[i] = X[i]; Y2[i] = Y[i] + a * Math.sin(X[i] * f); } }));
+
+// --- warps (one image displaces the coordinates of another) ---
+def('wgrad', 2, [K.warpk], 0.4, (ctx, nd, X, Y) => {
+  const n = ctx.n, N = ctx.N, ga = E(ctx, nd.a[1], X, Y), g = lum(ctx, ga); pool.put(ga);
+  const X2 = pool.get(n), Y2 = pool.get(n), k = nd.k[0] * 0.15;
+  for (let i = 0; i < n; i++) { const d = grads(ctx, g, i, N); X2[i] = X[i] + k * clamp(d[0], -8, 8); Y2[i] = Y[i] + k * clamp(d[1], -8, 8); }
+  pool.put(g);
+  const r = E(ctx, nd.a[0], X2, Y2); pool.put(X2); pool.put(Y2); return r;
+});
+def('wrot', 2, [K.unit], 0.4, (ctx, nd, X, Y) => {
+  const n = ctx.n, aa = E(ctx, nd.a[1], X, Y), t = lum(ctx, aa); pool.put(aa);
+  const X2 = pool.get(n), Y2 = pool.get(n), k = nd.k[0] * PI;
+  for (let i = 0; i < n; i++) { const c = Math.cos(t[i] * k), s = Math.sin(t[i] * k); X2[i] = c * X[i] - s * Y[i]; Y2[i] = s * X[i] + c * Y[i]; }
+  pool.put(t);
+  const r = E(ctx, nd.a[0], X2, Y2); pool.put(X2); pool.put(Y2); return r;
+});
+def('wscale', 2, [K.unit], 0.3, (ctx, nd, X, Y) => {
+  const n = ctx.n, aa = E(ctx, nd.a[1], X, Y), t = lum(ctx, aa); pool.put(aa);
+  const X2 = pool.get(n), Y2 = pool.get(n), k = nd.k[0];
+  for (let i = 0; i < n; i++) { const f = Math.exp(clamp(t[i] * k, -3, 3)); X2[i] = X[i] * f; Y2[i] = Y[i] * f; }
+  pool.put(t);
+  const r = E(ctx, nd.a[0], X2, Y2); pool.put(X2); pool.put(Y2); return r;
+});
+
+// --- image filters (screen space) ---
+function blurChannels(a, N, n, r, h, v) {
+  const tmp = pool.get(n);
+  for (let c = 0; c < 3; c++) { const ch = a.subarray(c * n, c * n + n); for (let p = 0; p < 3; p++) { if (h) { boxH(ch, tmp, N, r); ch.set(tmp); } if (v) { boxV(ch, tmp, N, r); ch.set(tmp); } } }
+  pool.put(tmp);
+}
+const pxr = (rad, N) => Math.round(rad * N / 2 / 1.7);
+def('hblur', 1, [K.radius], 0.3, (ctx, nd, X, Y) => { const a = E(ctx, nd.a[0], X, Y), r = pxr(nd.k[0] * 2, ctx.N); if (r >= 1) blurChannels(a, ctx.N, ctx.n, r, true, false); return a; });
+def('vblur', 1, [K.radius], 0.3, (ctx, nd, X, Y) => { const a = E(ctx, nd.a[0], X, Y), r = pxr(nd.k[0] * 2, ctx.N); if (r >= 1) blurChannels(a, ctx.N, ctx.n, r, false, true); return a; });
+function dogOp(f) { // f(original, blurred, k)
+  return (ctx, nd, X, Y) => {
+    const a = E(ctx, nd.a[0], X, Y), n = ctx.n, b = pool.get(3 * n); b.set(a);
+    const r = Math.max(1, pxr(0.04, ctx.N)); blurChannels(b, ctx.N, n, r, true, true);
+    for (let i = 0; i < 3 * n; i++) a[i] = f(a[i], b[i], nd.k);
+    pool.put(b); return a;
+  };
+}
+def('sharpen', 1, [K.gain], 0.4, dogOp((a, b, k) => a + (a - b) * k[0]));
+def('edges', 1, [], 0.4, dogOp((a, b) => (a - b) * 4));
+def('emboss', 1, [K.angle], 0.3, (ctx, nd, X, Y) => {
+  const a = E(ctx, nd.a[0], X, Y), N = ctx.N, n = ctx.n, o = pool.get(3 * n), cx = Math.cos(nd.k[0]), cy = Math.sin(nd.k[0]);
+  for (let c = 0; c < 3; c++) { const v = a.subarray(c * n, c * n + n); for (let i = 0; i < n; i++) { const g = grads(ctx, v, i, N); o[i + c * n] = clamp((g[0] * cx + g[1] * cy) * 0.15, -3, 3); } }
+  pool.put(a); return o;
+});
+function morph(isMax) {
+  return (ctx, nd, X, Y) => {
+    const a = E(ctx, nd.a[0], X, Y), N = ctx.N, n = ctx.n, r = Math.min(12, Math.round(nd.k[0] * N / 2)), M = N - 1;
+    if (r < 1) return a;
+    const tmp = pool.get(n);
+    for (let c = 0; c < 3; c++) {
+      const ch = a.subarray(c * n, c * n + n);
+      for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) { let m = ch[y * N + x]; for (let d = -r; d <= r; d++) { const v = ch[y * N + clamp(x + d, 0, M)]; if (isMax ? v > m : v < m) m = v; } tmp[y * N + x] = m; }
+      for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) { let m = tmp[y * N + x]; for (let d = -r; d <= r; d++) { const v = tmp[clamp(y + d, 0, M) * N + x]; if (isMax ? v > m : v < m) m = v; } ch[y * N + x] = m; }
+    }
+    pool.put(tmp); return a;
+  };
+}
+def('erode', 1, [K.radius], 0.3, morph(false));
+def('dilate', 1, [K.radius], 0.3, morph(true));
+
+// --- fractals ---
+function escape(zx, zy, cx, cy, it) { // smooth escape-time, mapped to [-1,1]; inside -> -1
+  for (let i = 0; i < it; i++) {
+    const x2 = zx * zx, y2 = zy * zy;
+    if (x2 + y2 > 16) return from01((i + 1 - Math.log2(Math.log2(x2 + y2) * 0.5)) / it);
+    zy = 2 * zx * zy + cy; zx = x2 - y2 + cx;
+  }
+  return -1;
+}
+def('julia', 0, [K.unit, K.unit, K.iters], 0.4, term1((x, y, k) => escape(x * 1.5, y * 1.5, k[0] * 0.8, k[1] * 0.8, k[2])));
+def('mandel', 0, [K.scale, K.unit, K.unit, K.iters], 0.4, term1((x, y, k) => escape(0, 0, x * 1.4 * k[0] + k[1] * 0.7 - 0.5, y * 1.4 * k[0] + k[2] * 0.7, k[3])));
+def('juliaw', 2, [K.iters], 0.3, (ctx, nd, X, Y) => {
+  const n = ctx.n, ua = E(ctx, nd.a[0], X, Y), u = lum(ctx, ua); pool.put(ua);
+  const va = E(ctx, nd.a[1], X, Y), v = lum(ctx, va); pool.put(va);
+  const o = pool.get(3 * n), it = nd.k[0];
+  for (let i = 0; i < n; i++) o[i] = o[i + n] = o[i + 2 * n] = escape(X[i] * 1.5, Y[i] * 1.5, clamp(u[i], -1.5, 1.5) * 0.8, clamp(v[i], -1.5, 1.5) * 0.8, it);
+  pool.put(u); pool.put(v); return o;
+});
+def('kifs', 1, [K.angle, K.scale, K.depth], 0.4, coordOp((k, X, Y, X2, Y2, n) => { // kaleidoscopic IFS fold
+  const c = Math.cos(k[0]), s = Math.sin(k[0]), sc = 1.2 + Math.min(1.5, Math.abs(k[1] - 1)), it = Math.round(k[2]);
+  for (let i = 0; i < n; i++) {
+    let x = X[i], y = Y[i];
+    for (let j = 0; j < it; j++) { x = Math.abs(x); y = Math.abs(y); if (x < y) { const t = x; x = y; y = t; } const rx = c * x - s * y, ry = s * x + c * y; x = rx * sc - (sc - 1) * 0.6; y = ry * sc; }
+    X2[i] = x / Math.pow(sc, it) * 2; Y2[i] = y / Math.pow(sc, it) * 2;
+  }
+}));
+def('sierp', 0, [K.depth], 0.3, term1((x, y, k) => { // Sierpinski carpet via base-3 digits
+  let u = Math.floor(to01(x) * 729), v = Math.floor(to01(y) * 729); const it = Math.round(k[0]) + 1;
+  for (let j = 0; j < it; j++) { if (u % 3 === 1 && v % 3 === 1) return -1; u = Math.floor(u / 3); v = Math.floor(v / 3); }
+  return 1;
+}));
+
+// ======================================================================
+// Families: every op belongs to exactly one; each op can be switched off.
+// ======================================================================
+const FAMILIES = [
+  { id: 'coord',   name: 'Coordinates',          ops: ['x', 'y', 'r', 'th', 'l1', 'linf', 'grad'] },
+  { id: 'const',   name: 'Constants',            ops: ['c', 'v'] },
+  { id: 'pattern', name: 'Patterns',             ops: ['checker', 'stripes', 'rings', 'dots', 'spiral', 'star', 'hexgrid', 'eggcrate', 'bricks'] },
+  { id: 'noise',   name: 'Noise',                ops: ['noise', 'cnoise', 'fbm', 'ridged', 'turb', 'cells', 'cracks', 'ccells', 'wnoise', 'wcnoise', 'wcells'] },
+  { id: 'arith',   name: 'Arithmetic',           ops: ['add', 'sub', 'mul', 'div', 'mod', 'neg', 'abs', 'min', 'max', 'avg', 'absdiff', 'hypot'] },
+  { id: 'shape',   name: 'Periodic & shaping',   ops: ['sin', 'tri', 'saw', 'sqwave', 'tanh', 'smooth', 'fold', 'clamp'] },
+  { id: 'power',   name: 'Powers & logs',        ops: ['log', 'exp', 'sqrt', 'sq', 'cube', 'recip', 'gamma', 'pow', 'atan2'] },
+  { id: 'logic',   name: 'Logic & quantize',     ops: ['floor', 'step', 'gt', 'and', 'or', 'xor', 'if', 'dither'] },
+  { id: 'color',   name: 'Colour',               ops: ['hsv', 'lum', 'vec', 'hue', 'sat', 'chan', 'swap', 'palette', 'sepia'] },
+  { id: 'blend',   name: 'Blending',             ops: ['lerp', 'mask', 'screen', 'overlay', 'dodge', 'burn'] },
+  { id: 'xform',   name: 'Coordinate transforms', ops: ['rot', 'xform', 'zoom', 'shear', 'mirror', 'tile', 'brick', 'pixel', 'polar', 'unpolar', 'kal', 'swirl', 'fisheye', 'pinch', 'ripple', 'wave', 'cinv'] },
+  { id: 'warp',    name: 'Warps',                ops: ['warp', 'wrel', 'wgrad', 'wrot', 'wscale'] },
+  { id: 'filter',  name: 'Image filters',        ops: ['blur', 'hblur', 'vblur', 'sharpen', 'edges', 'gmag', 'gdir', 'bump', 'emboss', 'erode', 'dilate'] },
+  { id: 'fractal', name: 'Fractals',             ops: ['julia', 'mandel', 'juliaw', 'kifs', 'sierp'] },
+];
+const DESCS = {
+  x: 'horizontal position', y: 'vertical position', r: 'distance from centre', th: 'angle around centre', l1: 'diamond distance |x|+|y|', linf: 'square distance max(|x|,|y|)', grad: 'linear ramp at an angle',
+  c: 'grey constant', v: 'colour constant',
+  checker: 'checkerboard', stripes: 'soft stripes at an angle', rings: 'concentric rings', dots: 'polka dots', spiral: 'n-armed spiral', star: 'n-pointed star', hexgrid: 'hexagonal cells', eggcrate: 'sin x · sin y', bricks: 'brick wall',
+  noise: 'gradient noise', cnoise: 'colour noise', fbm: 'fractal noise (4 octaves)', ridged: 'ridged multifractal', turb: 'turbulence |noise| sum', cells: 'Worley cell distance', cracks: 'Voronoi cell borders', ccells: 'Voronoi cells, random colours', wnoise: 'noise at coords (a,b)', wcnoise: 'colour noise at coords (a,b)', wcells: 'cells at coords (a,b)',
+  add: 'a + b', sub: 'a − b', mul: 'a × b', div: 'a ÷ b', mod: 'a mod b', neg: '−a', abs: '|a|', min: 'min(a,b)', max: 'max(a,b)', avg: '(a+b)/2', absdiff: '|a − b|', hypot: '√(a²+b²)',
+  sin: 'sine with freq & phase', tri: 'triangle wave', saw: 'sawtooth wave', sqwave: 'square wave', tanh: 'soft clip', smooth: 'smoothstep', fold: 'mirror-fold into range', clamp: 'hard clip',
+  log: 'log |a|', exp: 'eᵃ', sqrt: '√|a|', sq: 'a²', cube: 'a³', recip: '1/a', gamma: 'signed power curve', pow: '|a|ᵇ', atan2: 'angle of (b,a)',
+  floor: 'posterize to levels', step: 'threshold', gt: 'a > b', and: 'bitwise and', or: 'bitwise or', xor: 'bitwise xor', if: 'if a>0 then b else c', dither: 'ordered (Bayer) dither',
+  hsv: 'treat channels as HSV', lum: 'to greyscale', vec: 'RGB from three images', hue: 'hue rotation', sat: 'saturation', chan: 'pick one channel', swap: 'permute channels', palette: 'cosine colour palette', sepia: 'sepia tone',
+  lerp: 'blend a→b by c', mask: 'hard-edged blend by c', screen: 'screen blend', overlay: 'overlay blend', dodge: 'colour dodge', burn: 'colour burn',
+  rot: 'rotate', xform: 'scale + translate', zoom: 'zoom', shear: 'shear', mirror: 'mirror x / y / both', tile: 'repeat tiles', brick: 'offset tiles', pixel: 'pixelate', polar: 'to polar coords', unpolar: 'from polar coords', kal: 'kaleidoscope', swirl: 'swirl', fisheye: 'fisheye / barrel', pinch: 'pinch / bulge', ripple: 'ripple displacement', wave: 'wavy displacement', cinv: 'circle inversion',
+  warp: 'sample a at coords (b,c)', wrel: 'displace a by (b,c)', wgrad: 'displace a along gradient of b', wrot: 'rotate a by amount b', wscale: 'zoom a by amount b',
+  blur: 'gaussian blur', hblur: 'horizontal motion blur', vblur: 'vertical motion blur', sharpen: 'unsharp mask', edges: 'difference of blur (edges)', gmag: 'gradient magnitude', gdir: 'gradient direction', bump: 'bump-map lighting', emboss: 'directional emboss', erode: 'min filter', dilate: 'max filter',
+  julia: 'Julia set', mandel: 'Mandelbrot set', juliaw: 'Julia set with c from (a,b)', kifs: 'kaleidoscopic IFS fold', sierp: 'Sierpinski carpet',
+};
+for (const f of FAMILIES) for (const name of f.ops) { if (!OPS[name]) throw new Error('family lists unknown op ' + name); OPS[name].fam = f.id; OPS[name].desc = DESCS[name] || ''; }
+for (const name in OPS) if (!OPS[name].fam) throw new Error('op without family ' + name);
+
+let ATERMS = TERMS.slice(), AFUNCS = FUNCS.slice();
+function refreshActive() {
+  ATERMS = TERMS.filter((o) => o.on); AFUNCS = FUNCS.filter((o) => o.on);
+  if (!ATERMS.length) ATERMS = [OPS.x, OPS.y]; // trees need leaves
+}
+function setEnabled(name, on) { if (OPS[name]) OPS[name].on = !!on; refreshActive(); }
+function setFamily(id, on) { for (const f of FAMILIES) if (f.id === id) for (const n of f.ops) OPS[n].on = !!on; refreshActive(); }
+function setAllEnabled(on) { for (const n in OPS) OPS[n].on = !!on; refreshActive(); }
+const enabledNames = () => Object.keys(OPS).filter((n) => OPS[n].on);
+
+
 // ---------- evaluation ----------
 const grids = new Map();
 function grid(N) {
@@ -279,7 +597,7 @@ function pickWeighted(list) { let s = 0; for (const o of list) s += o.w; let r =
 function makeNode(op, kids) { return { op: op.name, k: op.k.map((s) => s.gen()), a: kids }; }
 function randTree(maxDepth = 4, d = 0) {
   const term = d >= maxDepth || (d > 0 && rnd() < 0.1 + 0.6 * d / maxDepth);
-  const op = pickWeighted(term ? TERMS : FUNCS);
+  const op = pickWeighted(term || !AFUNCS.length ? ATERMS : AFUNCS);
   return makeNode(op, Array.from({ length: op.arity }, () => randTree(maxDepth, d + 1)));
 }
 function jitterConsts(node, amt) {
@@ -303,16 +621,18 @@ function mutateOnce(t, amt) {
   if (r < 0.50) return replaceAt(t, e, randTree(1 + randi(3), 0)); // new random subtree
   if (r < 0.66) { // change the function, keeping what arguments fit
     const old = e.node, oldOp = OPS[old.op];
-    const pool_ = oldOp.arity === 0 ? TERMS : rnd() < 0.7 ? FUNCS.filter((o) => o.arity === oldOp.arity) : FUNCS;
+    const same = AFUNCS.filter((o) => o.arity === oldOp.arity);
+    const pool_ = oldOp.arity === 0 || !AFUNCS.length ? ATERMS : rnd() < 0.7 && same.length ? same : AFUNCS;
     const op = pickWeighted(pool_);
     const kids = [];
     for (let i = 0; i < op.arity; i++) kids.push(i < old.a.length ? old.a[i] : old.a.length && rnd() < 0.5 ? clone(old.a[randi(old.a.length)]) : randTree(1 + randi(2), 0));
     const nn = makeNode(op, kids);
-    if (op.k.length === old.k.length) nn.k = old.k.slice();
+    if (op.k.length === old.k.length && op.k.every((kind, i) => kind === oldOp.k[i])) nn.k = old.k.slice(); // keep constants only if they mean the same thing
     return replaceAt(t, e, nn);
   }
   if (r < 0.78) { // node becomes an argument to a new function
-    const op = pickWeighted(FUNCS), slot = randi(op.arity);
+    if (!AFUNCS.length) return replaceAt(t, e, randTree(0, 0));
+    const op = pickWeighted(AFUNCS), slot = randi(op.arity);
     const kids = Array.from({ length: op.arity }, (_, i) => (i === slot ? e.node : randTree(1 + randi(2), 0)));
     return replaceAt(t, e, makeNode(op, kids));
   }
@@ -529,7 +849,7 @@ class Evolver {
 }
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
-const GP = { OPS, TERMS, FUNCS, evaluate, release, toRGBA, randTree, randomInteresting, mutate, mutants, crossover, clone, size, depth,
+const GP = { OPS, TERMS, FUNCS, FAMILIES, setEnabled, setFamily, setAllEnabled, enabledNames, evaluate, release, toRGBA, randTree, randomInteresting, mutate, mutants, crossover, clone, size, depth,
   toString, pretty, parse, signature, sigStd, sigDist, Target, distance, bake, Evolver, noise2,
   setRandom: (f) => { rnd = f; }, seedRandom: (s) => { rnd = mulberry32(s); }, useMathRandom: () => { rnd = Math.random; } };
 if (typeof module !== 'undefined' && module.exports) module.exports = GP; else root.GP = GP;
