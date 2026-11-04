@@ -74,6 +74,12 @@
   .wrow { display: grid; grid-template-columns: 118px 1fr 30px; align-items: center; gap: 6px; font-size: 12px; }
   .wrow .wname { color: var(--ink); } .wrow .wval { color: var(--dim); font: 11px ui-monospace, monospace; text-align: right; }
   .wrow input[type=range] { margin: 2px 0; }
+  #movie { position: fixed; inset: 0; background: #000c; z-index: 20; display: flex; align-items: center; justify-content: center; gap: 20px; padding: 24px; }
+  #mvPrev { max-width: min(62vw, 900px); max-height: 80vh; border-radius: 6px; background: #000; }
+  #movie .side { width: 340px; display: flex; flex-direction: column; gap: 6px; max-height: 86vh; overflow-y: auto; }
+  #movie .side h3 { margin: 0 0 4px; font-size: 16px; }
+  #movie .side > label { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  #mvProg { font: 12px ui-monospace, monospace; color: var(--acc); min-height: 1.4em; white-space: pre-wrap; }
 </style>
 </head>
 <body>
@@ -97,6 +103,7 @@
     <label>Centre genome (editable)</label>
     <textarea id="geno" spellcheck="false"></textarea>
     <div class="row"><button id="apply">Use this genome</button><button id="copy">Copy</button><button id="saveC">Save centre PNG</button></div>
+    <div class="row"><button id="movieI">🎬 Make a movie of this lineage</button></div>
   </section>
 
   <section id="paneA" class="hidden">
@@ -124,6 +131,7 @@
       <button id="reset">Reset population</button>
       <button id="saveBest">Save best PNG</button>
     </div>
+    <div class="row"><button id="movieA" style="flex:1">🎬 Make a movie of this run</button></div>
     <h3 class="wh">Match weights</h3>
     <div class="help" style="margin-top:0">Each measure is scored relative to a flat image of the target's average colour (0 = perfect, 1 = no better than flat); the match error is their weighted mean. Changing weights re-scores the whole population.</div>
     <div class="row"><button data-wpreset="colour">Colour only</button><button data-wpreset="balanced">Balanced</button><button data-wpreset="feel">Look &amp; feel</button><button data-wpreset="shape">Shape</button></div>
@@ -169,8 +177,27 @@
     </div>
   </div>
 </div>
+<div id="movie" class="hidden">
+  <canvas id="mvPrev" width="360" height="360"></canvas>
+  <div class="side">
+    <h3>🎬 Movie of the evolution</h3>
+    <div class="help" style="margin:0">Every new best of an auto-evolve run, and every new centre you pick in Interactive mode, is recorded. The movie steps through them, morphing smoothly where two genomes share a tree shape.</div>
+    <label>Source <select id="mvSrc"><option value="run">Auto-evolve run</option><option value="lineage">Interactive lineage</option></select></label>
+    <label>Seconds per step <select id="mvSec"><option value="0.2">0.2</option><option value="0.4">0.4</option><option value="0.7" selected>0.7</option><option value="1.2">1.2</option><option value="2">2</option><option value="3">3</option></select></label>
+    <label>Longest movie <select id="mvMax"><option value="10">10 s</option><option value="20">20 s</option><option value="30" selected>30 s</option><option value="60">1 min</option><option value="120">2 min</option><option value="300">5 min</option></select></label>
+    <label>Transition <select id="mvTr"><option value="morph" selected>Morph / crossfade</option><option value="fade">Crossfade</option><option value="cut">Cut</option></select></label>
+    <label>Image size <select id="mvSize"><option value="360">360 px</option><option value="540">540 px</option><option value="720" selected>720 px</option><option value="1080">1080 px</option></select></label>
+    <label>Frame rate <select id="mvFps"><option value="24">24 fps</option><option value="30" selected>30 fps</option><option value="60">60 fps</option></select></label>
+    <label id="mvTgtRow"><span><input id="mvTgt" type="checkbox" checked> Target alongside</span></label>
+    <label><span><input id="mvCap" type="checkbox" checked> Captions (generation, error)</span></label>
+    <div id="mvInfo" class="help"></div>
+    <div class="row"><button id="mvPlay">▶ Preview</button><button id="mvMake">⬇ Make video</button><button id="mvStop">■ Stop</button><button id="mvClose">Close</button></div>
+    <div id="mvProg"></div>
+  </div>
+</div>
 <div id="toast"></div>
 <script src="gp.js"></script>
+<script src="movie.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

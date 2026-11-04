@@ -9,6 +9,14 @@ Open `index.html` through any static server (`python3 -m http.server`), no build
 - **Saving**: Save PNG (512/1024/2048) and Save genome in the large view, Save centre PNG,
   Save best PNG. Inside claude.ai the page uses the artifact `downloads` capability (you confirm
   each save); elsewhere a normal download.
+- **Movies** (🎬 in either mode): every new centre you pick, and every new best of an auto-evolve
+  run, is recorded. The movie steps through them (thinned evenly to the length you choose).
+  Consecutive genomes with the same tree shape morph by interpolating their constants frame by
+  frame; others crossfade. Options: seconds per step, max length, size up to 1080 px, 24/30/60 fps,
+  target alongside, captions (generation, error). Frames are rendered offline and encoded with
+  WebCodecs H.264 into an MP4 muxed in `movie.js` (no libraries), so heavy frames never stutter;
+  without WebCodecs it falls back to real-time MediaRecorder. A 10 s 720×360 run movie takes ~3 s,
+  a 15 s 1080² one ~9 s (Chrome, M-series Mac).
 - **Mating**: ♥ any two tiles and press Mate. In interactive mode ♥A moves to the centre and the
   eight around it are crossover children of A and B. In auto-evolve, 16 children are scored and
   offered to the parents' islands.

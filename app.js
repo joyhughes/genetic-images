@@ -60,7 +60,18 @@ let history = [];
 let busy = false;
 const amt = () => +$('amt').value;
 
+// Every new centre is recorded for the movie maker (movie.js).
+let lineage = [];
+function noteCentre() {
+  if (!cells[4]) return;
+  const s = GP.toString(cells[4]);
+  if (lineage.length && lineage[lineage.length - 1].s === s) return;
+  lineage.push({ s, cap: 'generation ' + lineage.length });
+  if (lineage.length > 1500) lineage.splice(1, 1);
+}
 function save() {
+  noteCentre();
+  store.set('gi.lineage', JSON.stringify(lineage.slice(-300)));
   store.set('gi.cells', JSON.stringify(cells.map((t) => GP.toString(t))));
   store.set('gi.history', JSON.stringify(history.slice(-40)));
 }
@@ -119,6 +130,7 @@ function choose(i) {
 function back() {
   if (busy || !history.length) return;
   cells = history.pop().map(GP.parse);
+  if (lineage.length > 1) lineage.pop();
   renderAll(false); showGenome(); save();
 }
 function onTileClick(i) {
@@ -248,7 +260,7 @@ let mode = 'I', savedInteractive = null;
 let evo = null, running = false, target = null, targetSrc = null, targetName = '';
 let lastStats = 0, lastGrid = 0, lastBest = null, evalMark = { t: 0, n: 0, rate: 0 };
 const shown = new Array(9).fill('');
-const tgtSize = 256;
+const tgtSize = 512; // kept larger than the match resolution so movies can show the target sharply
 
 function setMode(m, keepGrid) {
   if (m === mode) return;
@@ -331,16 +343,27 @@ for (const el of [drop, document.body]) {
   el.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files[0]) { setMode('A'); loadImageFile(e.dataTransfer.files[0]); } });
 }
 
+// Every new best of the run is recorded for the movie maker; thinned if a run gets very long.
+let runReel = [], runLast = null;
+function noteRun() {
+  if (!evo || evo.best === runLast) return;
+  runLast = evo.best;
+  const s = GP.toString(evo.baked(evo.best));
+  if (runReel.length && runReel[runReel.length - 1].s === s) return;
+  const gen = Math.round(evo.evals / evo.popSize).toLocaleString();
+  runReel.push({ s, cap: `generation ${gen} · error ${evo.best.err.toFixed(4)}` });
+  if (runReel.length > 4000) runReel = runReel.filter((_, i) => i % 2 === 0 || i === runReel.length - 1);
+}
 function resetEvo() {
   const wasRunning = running;
-  evo = null; lastBest = null; shown.fill('');
+  evo = null; lastBest = null; shown.fill(''); runReel = []; runLast = null;
   if (!target) { updateStats(); return; }
   const pop = +$('popSize').value;
   evo = new GP.Evolver(target, { popSize: pop, islands: +$('islands').value, parsimony: +$('pars').value * PARS_UNIT,
     migrateEvery: +$('migr').value * pop, mateEvery: +$('mateEv').value * pop });
   const seeds = [];
   if ($('seedC').checked) { const c = interactiveCenter(); if (c) { seeds.push(c); seeds.push(...GP.mutants(c, 8, 0.5)); } }
-  evo.seed(seeds);
+  evo.seed(seeds); noteRun();
   evalMark = { t: performance.now(), n: 0, rate: 0 };
   showPopulation(true); drawBest(); updateStats();
   if (wasRunning) startAuto();
@@ -511,6 +534,7 @@ buildFamilies();
 function frame() {
   const t0 = performance.now();
   if (running && evo && mode === 'A') evo.step(queue.length ? 14 : 22);
+  if (evo) noteRun();
   pumpQueue(Math.max(6, 28 - (performance.now() - t0)));
   const now = performance.now();
   if (mode === 'A' && evo) {
@@ -522,6 +546,7 @@ function frame() {
 
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (Movie.isOpen()) { if (e.key === 'Escape') Movie.close(); return; }
   if (e.key === 'Escape') { if (!$('modal').classList.contains('hidden')) closeModal(); else clearPicks(); }
   else if (e.key === 'Backspace' && mode === 'I') { e.preventDefault(); back(); }
   else if (e.key === ' ' && mode === 'A') { e.preventDefault(); running ? stopAuto() : startAuto(); }
@@ -531,10 +556,19 @@ document.addEventListener('keydown', (e) => {
 (function init() {
   try {
     const c = JSON.parse(store.get('gi.cells') || 'null'), h = JSON.parse(store.get('gi.history') || '[]');
+    const l = JSON.parse(store.get('gi.lineage') || '[]');
+    if (Array.isArray(l)) lineage = l.filter((x) => x && typeof x.s === 'string');
     if (Array.isArray(c) && c.length === 9) { cells = c.map(GP.parse); history = Array.isArray(h) ? h : []; renderAll(false); showGenome(); }
     else randomNine();
   } catch (e) { history = []; randomNine(); }
-  window.gi = { get cells() { return cells; }, get evo() { return evo; }, choose, preset, startAuto, stopAuto, setMode, GP };
+  Movie.init({ GP, drawTree, saveFile, stamp, toast,
+    reels: () => ({ run: runReel, lineage }),
+    target: () => targetSrc,
+    pause: () => { const was = running; stopAuto(); return was; },
+    resume: (was) => { if (was && mode === 'A') startAuto(); } });
+  $('movieI').onclick = () => Movie.open('lineage');
+  $('movieA').onclick = () => Movie.open('run');
+  window.gi = { get lineage() { return lineage; }, get runReel() { return runReel; }, get cells() { return cells; }, get evo() { return evo; }, choose, preset, startAuto, stopAuto, setMode, GP };
   requestAnimationFrame(frame);
 })();
 })();
