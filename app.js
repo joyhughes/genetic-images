@@ -501,6 +501,7 @@ function buildFamilies() {
       const op = GP.OPS[name], l = document.createElement('label'), nm = document.createElement('span'), ds = document.createElement('span');
       const c = document.createElement('input'); c.type = 'checkbox'; c.dataset.op = name;
       nm.className = 'nm'; nm.append(c, document.createTextNode(name));
+      if (op.centred) { const m = document.createElement('span'); m.className = 'cen'; m.textContent = '◎'; m.title = 'can have its own centre (off-centre functions)'; nm.append(m); }
       ds.className = 'ds'; ds.textContent = op.desc + (op.arity ? ` · ${op.arity} arg${op.arity > 1 ? 's' : ''}` : '');
       l.append(nm, ds); ops.append(l);
       c.onchange = () => { GP.setEnabled(name, c.checked); saveOpPrefs(); syncFamilies(); };
@@ -529,6 +530,19 @@ $('famNone').onclick = () => { GP.setAllEnabled(false); saveOpPrefs(); syncFamil
 $('famReroll').onclick = () => { if (mode === 'A') { stopAuto(); setMode('I', true); } randomNine(); };
 loadOpPrefs();
 buildFamilies();
+
+// Off-centre functions: probability a new centred function gets a random centre offset.
+function applyOffsets() {
+  const on = $('offOn').checked, pct = +$('offRate').value;
+  GP.setOffsetRate(on ? pct / 100 : 0);
+  $('offRate').disabled = !on;
+  $('offv').textContent = on ? pct + '% of new ◎ functions' : 'off';
+  store.set('gi.offset', JSON.stringify({ on, pct }));
+}
+try { const o = JSON.parse(store.get('gi.offset') || 'null'); if (o) { $('offOn').checked = !!o.on; $('offRate').value = o.pct; } } catch (e) { /* defaults */ }
+$('offOn').onchange = applyOffsets;
+$('offRate').oninput = applyOffsets;
+applyOffsets();
 
 // ---------- main loop ----------
 function frame() {

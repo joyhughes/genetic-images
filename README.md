@@ -9,6 +9,14 @@ Open `index.html` through any static server (`python3 -m http.server`), no build
 - **Saving**: Save PNG (512/1024/2048) and Save genome in the large view, Save centre PNG,
   Save best PNG. Inside claude.ai the page uses the artifact `downloads` capability (you confirm
   each save); elsewhere a normal download.
+- **Off-centre functions** (checkbox + rate in the Function families panel, off by default): the 37
+  position-dependent functions (◎ in the list: r, th, rings, spiral, star, dots, checker…, rot, zoom,
+  swirl, kal, fisheye, cinv…, julia, mandel, kifs…) can carry their own centre `node.o = [cx, cy]`,
+  written `(rings@0.3,-0.2 5)`. The op is evaluated at shifted coordinates while its children keep
+  the parent's frame, and coordinate-mapping ops add the offset back, so `(rot@c a t)` rotates `t`
+  about c. New centred nodes get an offset with the chosen probability; mutation moves, adds and
+  removes centres. x, y, grad and noise have none (an offset would only be a constant or reseed).
+  No measurable evaluation cost (`test/offset.test.js` checks the semantics).
 - **Movies** (🎬 in either mode): every new centre you pick, and every new best of an auto-evolve
   run, is recorded. The movie steps through them (thinned evenly to the length you choose).
   Consecutive genomes with the same tree shape morph by interpolating their constants frame by

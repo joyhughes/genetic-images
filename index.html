@@ -80,6 +80,10 @@
   #movie .side h3 { margin: 0 0 4px; font-size: 16px; }
   #movie .side > label { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
   #mvProg { font: 12px ui-monospace, monospace; color: var(--acc); min-height: 1.4em; white-space: pre-wrap; }
+  .offbox { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 8px 0 4px; }
+  .offhead { color: var(--ink) !important; font-size: 13px !important; display: flex; gap: 7px; align-items: center; cursor: pointer; }
+  .offbox code { font-size: 11px; color: #cfe3c8; }
+  .opsl .cen { color: var(--acc); font-size: 11px; }
 </style>
 </head>
 <body>
@@ -156,6 +160,11 @@
     <h2>Function families <span id="famTotal" class="count" style="color:var(--dim);font-weight:normal;font-size:12px"></span></h2>
     <div class="help" style="margin-top:0">Switch off whole families or single functions (▸). Applies to new random images, mutations and auto-evolve; existing genomes keep what they already contain.</div>
     <div class="row"><button id="famAll">All on</button><button id="famNone">All off</button><button id="famReroll">New random 9 with these</button></div>
+    <div class="offbox">
+      <label class="offhead"><input id="offOn" type="checkbox"> Off-centre functions <span id="offv" class="count"></span></label>
+      <input id="offRate" type="range" min="5" max="100" step="5" value="35">
+      <div class="help" style="margin:2px 0 0">Lets each ◎ function (rings, spirals, stars, rotate, zoom, swirl, kaleidoscope, fractals…) have its own centre instead of the middle of the image. The slider sets how often a new function gets an offset; mutation also moves, adds and removes centres. In genomes an offset is written after the name: <code>(rings@0.3,-0.2 5)</code>.</div>
+    </div>
     <div id="famList"></div>
   </section>
 </aside>

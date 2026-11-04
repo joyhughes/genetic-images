@@ -10,12 +10,13 @@ let H = null; // hooks from app.js: { GP, drawTree, saveFile, stamp, toast, reel
 // ---------- genome interpolation ----------
 // Two genomes with the same tree shape can be morphed smoothly by interpolating their constants;
 // auto-evolve's successive bests often differ only that way (constant tuning, colour fit).
-function shapeKey(t) { return t.op + (t.a.length ? '(' + t.a.map(shapeKey).join(',') + ')' : ''); }
+function shapeKey(t) { return t.op + (t.o ? '@' : '') + (t.a.length ? '(' + t.a.map(shapeKey).join(',') + ')' : ''); }
 function lerpTree(A, B, u) {
   const spec = H.GP.OPS[A.op].k;
   return { op: A.op,
     k: A.k.map((v, i) => { const x = v + (B.k[i] - v) * u; return spec[i] && spec[i].int ? Math.round(x) : x; }),
-    a: A.a.map((c, i) => lerpTree(c, B.a[i], u)) };
+    a: A.a.map((c, i) => lerpTree(c, B.a[i], u)),
+    ...(A.o && B.o ? { o: [A.o[0] + (B.o[0] - A.o[0]) * u, A.o[1] + (B.o[1] - A.o[1]) * u] } : {}) };
 }
 const ease = (u) => u * u * (3 - 2 * u);
 const mkCanvas = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h || w; return c; };

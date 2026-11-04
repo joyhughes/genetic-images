@@ -67,7 +67,26 @@ const K = {
 const OPS = {};
 const TERMS = [], FUNCS = [];
 function def(name, arity, k, w, ev) { const op = { name, arity, k: k || [], w, ev, on: true, fam: null }; OPS[name] = op; (arity ? FUNCS : TERMS).push(op); }
-const E = (ctx, node, X, Y) => OPS[node.op].ev(ctx, node, X, Y);
+// Optional per-node centre offset node.o = [cx, cy] for ops whose result depends on where the
+// origin is (rings, spirals, rotate, swirl, fractals...). The op is evaluated at coordinates
+// shifted by -o; its children still see the unshifted ones (ctx.alias maps the shifted arrays
+// back), and coordinate-producing ops add o back, so e.g. rot@c rotates its child about c.
+function E(ctx, node, X, Y) {
+  if (ctx.alias.size) { const ax = ctx.alias.get(X); if (ax) { X = ax; Y = ctx.alias.get(Y); } }
+  const op = OPS[node.op];
+  if (!node.o || !op.centred) return op.ev(ctx, node, X, Y);
+  const n = ctx.n, Xs = pool.get(n), Ys = pool.get(n), cx = node.o[0], cy = node.o[1];
+  for (let i = 0; i < n; i++) { Xs[i] = X[i] - cx; Ys[i] = Y[i] - cy; }
+  ctx.alias.set(Xs, X); ctx.alias.set(Ys, Y);
+  const r = op.ev(ctx, node, Xs, Ys);
+  ctx.alias.delete(Xs); ctx.alias.delete(Ys); pool.put(Xs); pool.put(Ys);
+  return r;
+}
+function unshift(node, X2, Y2, n) { // coordinate producers: map back into the parent's frame
+  if (!node.o || OPS[node.op].centred !== 'map') return;
+  const cx = node.o[0], cy = node.o[1];
+  for (let i = 0; i < n; i++) { X2[i] += cx; Y2[i] += cy; }
+}
 
 function lum(ctx, b) {
   const n = ctx.n, o = pool.get(n);
@@ -89,7 +108,7 @@ function pw2(f) {
 function coordOp(map) {
   return (ctx, node, X, Y) => {
     const n = ctx.n, X2 = pool.get(n), Y2 = pool.get(n);
-    map(node.k, X, Y, X2, Y2, n);
+    map(node.k, X, Y, X2, Y2, n); unshift(node, X2, Y2, n);
     const r = E(ctx, node.a[0], X2, Y2);
     pool.put(X2); pool.put(Y2); return r;
   };
@@ -430,14 +449,14 @@ def('wrot', 2, [K.unit], 0.4, (ctx, nd, X, Y) => {
   const n = ctx.n, aa = E(ctx, nd.a[1], X, Y), t = lum(ctx, aa); pool.put(aa);
   const X2 = pool.get(n), Y2 = pool.get(n), k = nd.k[0] * PI;
   for (let i = 0; i < n; i++) { const c = Math.cos(t[i] * k), s = Math.sin(t[i] * k); X2[i] = c * X[i] - s * Y[i]; Y2[i] = s * X[i] + c * Y[i]; }
-  pool.put(t);
+  pool.put(t); unshift(nd, X2, Y2, n);
   const r = E(ctx, nd.a[0], X2, Y2); pool.put(X2); pool.put(Y2); return r;
 });
 def('wscale', 2, [K.unit], 0.3, (ctx, nd, X, Y) => {
   const n = ctx.n, aa = E(ctx, nd.a[1], X, Y), t = lum(ctx, aa); pool.put(aa);
   const X2 = pool.get(n), Y2 = pool.get(n), k = nd.k[0];
   for (let i = 0; i < n; i++) { const f = Math.exp(clamp(t[i] * k, -3, 3)); X2[i] = X[i] * f; Y2[i] = Y[i] * f; }
-  pool.put(t);
+  pool.put(t); unshift(nd, X2, Y2, n);
   const r = E(ctx, nd.a[0], X2, Y2); pool.put(X2); pool.put(Y2); return r;
 });
 
@@ -551,6 +570,22 @@ const DESCS = {
 for (const f of FAMILIES) for (const name of f.ops) { if (!OPS[name]) throw new Error('family lists unknown op ' + name); OPS[name].fam = f.id; OPS[name].desc = DESCS[name] || ''; }
 for (const name in OPS) if (!OPS[name].fam) throw new Error('op without family ' + name);
 
+// Ops that can take a centre offset: 'pos' = computed from position; 'map' = also maps coordinates
+// for a child (offset added back afterwards). x, y, grad and noise are left out: an offset there is
+// just a constant or a reseed.
+const CENTRED = {
+  pos: ['r', 'th', 'l1', 'linf', 'checker', 'stripes', 'rings', 'dots', 'spiral', 'star', 'hexgrid', 'eggcrate', 'bricks',
+    'julia', 'mandel', 'juliaw', 'sierp', 'polar'],
+  map: ['rot', 'xform', 'kal', 'tile', 'swirl', 'zoom', 'shear', 'mirror', 'brick', 'pixel', 'unpolar', 'fisheye', 'pinch',
+    'ripple', 'cinv', 'wave', 'wrot', 'wscale', 'kifs'],
+};
+for (const kind in CENTRED) for (const name of CENTRED[kind]) { if (!OPS[name]) throw new Error('centred list: unknown op ' + name); OPS[name].centred = kind; }
+// Probability that a newly created centred node gets a random offset (0 = classic, everything about the middle).
+let offsetRate = 0;
+const genOffset = () => [clamp(gauss() * 0.45, -0.95, 0.95), clamp(gauss() * 0.45, -0.95, 0.95)];
+function setOffsetRate(p) { offsetRate = Math.max(0, Math.min(1, +p || 0)); }
+const getOffsetRate = () => offsetRate;
+
 let ATERMS = TERMS.slice(), AFUNCS = FUNCS.slice();
 function refreshActive() {
   ATERMS = TERMS.filter((o) => o.on); AFUNCS = FUNCS.filter((o) => o.on);
@@ -575,7 +610,7 @@ function grid(N) {
 }
 // Returns a pooled planar RGB Float32Array (length 3*N*N). Call release() when done with it.
 function evaluate(tree, N) {
-  const g = grid(N), ctx = { N, n: N * N };
+  const g = grid(N), ctx = { N, n: N * N, alias: new Map() };
   const o = E(ctx, tree, g.X, g.Y);
   for (let i = 0, L = o.length; i < L; i++) { const v = o[i]; o[i] = v === v ? (v > 1e4 ? 1e4 : v < -1e4 ? -1e4 : v) : 0; }
   return o;
@@ -589,12 +624,16 @@ function toRGBA(buf, N, out) {
 }
 
 // ---------- tree utilities ----------
-function clone(t) { return { op: t.op, k: t.k.slice(), a: t.a.map(clone) }; }
+function clone(t) { const c = { op: t.op, k: t.k.slice(), a: t.a.map(clone) }; if (t.o) c.o = t.o.slice(); return c; }
 function size(t) { let s = 1; for (const c of t.a) s += size(c); return s; }
 function depth(t) { let d = 0; for (const c of t.a) d = Math.max(d, depth(c)); return d + 1; }
 function collect(t, out = [], parent = null, idx = -1, d = 0) { out.push({ node: t, parent, idx, d }); t.a.forEach((c, i) => collect(c, out, t, i, d + 1)); return out; }
 function pickWeighted(list) { let s = 0; for (const o of list) s += o.w; let r = rnd() * s; for (const o of list) { r -= o.w; if (r <= 0) return o; } return list[list.length - 1]; }
-function makeNode(op, kids) { return { op: op.name, k: op.k.map((s) => s.gen()), a: kids }; }
+function makeNode(op, kids) {
+  const nd = { op: op.name, k: op.k.map((s) => s.gen()), a: kids };
+  if (offsetRate > 0 && op.centred && rnd() < offsetRate) nd.o = genOffset();
+  return nd;
+}
 function randTree(maxDepth = 4, d = 0) {
   const term = d >= maxDepth || (d > 0 && rnd() < 0.1 + 0.6 * d / maxDepth);
   const op = pickWeighted(term || !AFUNCS.length ? ATERMS : AFUNCS);
@@ -602,6 +641,10 @@ function randTree(maxDepth = 4, d = 0) {
 }
 function jitterConsts(node, amt) {
   const spec = OPS[node.op].k;
+  if (node.o && (!spec.length || rnd() < 0.35)) { // move the centre
+    for (let i = 0; i < 2; i++) node.o[i] = clamp(node.o[i] + gauss() * 0.15 * amt, -1.5, 1.5);
+    return true;
+  }
   if (!spec.length) return false;
   const all = rnd() < 0.3;
   const j = randi(spec.length);
@@ -615,8 +658,16 @@ function mutateOnce(t, amt) {
   const e = nodes[randi(nodes.length)];
   const r = rnd();
   if (r < 0.35) { // jitter constants of some node that has them
-    const cands = nodes.filter((x) => x.node.k.length);
+    const cands = nodes.filter((x) => x.node.k.length || x.node.o);
     if (cands.length) { jitterConsts(cands[randi(cands.length)].node, amt); return t; }
+  }
+  if (offsetRate > 0 && r < 0.40) { // give a centred function an offset, or move one back to the middle
+    const cands = nodes.filter((x) => OPS[x.node.op].centred);
+    if (cands.length) {
+      const nd = cands[randi(cands.length)].node;
+      if (nd.o && rnd() < 0.3) delete nd.o; else nd.o = genOffset();
+      return t;
+    }
   }
   if (r < 0.50) return replaceAt(t, e, randTree(1 + randi(3), 0)); // new random subtree
   if (r < 0.66) { // change the function, keeping what arguments fit
@@ -628,6 +679,7 @@ function mutateOnce(t, amt) {
     for (let i = 0; i < op.arity; i++) kids.push(i < old.a.length ? old.a[i] : old.a.length && rnd() < 0.5 ? clone(old.a[randi(old.a.length)]) : randTree(1 + randi(2), 0));
     const nn = makeNode(op, kids);
     if (op.k.length === old.k.length && op.k.every((kind, i) => kind === oldOp.k[i])) nn.k = old.k.slice(); // keep constants only if they mean the same thing
+    if (old.o && op.centred) nn.o = old.o.slice(); else if (!op.centred) delete nn.o;
     return replaceAt(t, e, nn);
   }
   if (r < 0.78) { // node becomes an argument to a new function
@@ -665,11 +717,13 @@ function crossover(a, b, maxNodes = 120) {
 
 // ---------- text form: (op consts... children...) ----------
 function fmtNum(v, prec) { if (Math.abs(v) < 1e-9) return '0'; return String(+v.toPrecision(prec)); }
+// A centre offset is written after the op name: (rings@0.3,-0.25 6.1)  or bare  r@0.3,-0.25
+const opName = (t, prec) => (t.o && OPS[t.op].centred ? t.op + '@' + fmtNum(t.o[0], Math.min(prec, 4)) + ',' + fmtNum(t.o[1], Math.min(prec, 4)) : t.op);
 function toString(t, prec = 7) {
   const op = OPS[t.op];
   if (t.op === 'c') return fmtNum(t.k[0], prec);
-  if (!op.k.length && !t.a.length) return t.op;
-  const parts = [t.op];
+  if (!op.k.length && !t.a.length) return opName(t, prec);
+  const parts = [opName(t, prec)];
   op.k.forEach((s, i) => parts.push(s.int ? fmtInt(t.k[i]) : fmtNum(t.k[i], prec)));
   for (const c of t.a) parts.push(toString(c, prec));
   return '(' + parts.join(' ') + ')';
@@ -678,9 +732,15 @@ function pretty(t, prec = 3, ind = 0, width = 64) {
   const flat = toString(t, prec);
   if (flat.length + ind <= width || !t.a.length) return flat;
   const op = OPS[t.op];
-  const head = '(' + [t.op].concat(op.k.map((s, i) => (s.int ? fmtInt(t.k[i]) : fmtNum(t.k[i], prec)))).join(' ');
+  const head = '(' + [opName(t, prec)].concat(op.k.map((s, i) => (s.int ? fmtInt(t.k[i]) : fmtNum(t.k[i], prec)))).join(' ');
   const pad = ' '.repeat(ind + 2);
   return head + t.a.map((c) => '\n' + pad + pretty(c, prec, ind + 2, width)).join('') + ')';
+}
+function splitOff(tok) { // "rings@0.3,-0.2" -> ['rings', [0.3, -0.2]]
+  const at = tok.indexOf('@'); if (at < 0) return [tok, null];
+  const xy = tok.slice(at + 1).split(',').map(Number);
+  if (xy.length !== 2 || !xy.every(isFinite)) throw new Error('bad offset in "' + tok + '"');
+  return [tok.slice(0, at), xy];
 }
 function parse(str) {
   const toks = str.replace(/[()]/g, (m) => ' ' + m + ' ').trim().split(/\s+/);
@@ -690,14 +750,18 @@ function parse(str) {
     const t = toks[p++];
     if (t === undefined) throw new Error('unexpected end');
     if (t === '(') {
-      const name = toks[p++], op = OPS[name];
+      const [name, o] = splitOff(toks[p++]), op = OPS[name];
       if (!op) throw new Error('unknown op "' + name + '"');
       const k = op.k.map(() => num(toks[p++]));
       const a = []; for (let i = 0; i < op.arity; i++) a.push(node());
       if (toks[p++] !== ')') throw new Error('expected ) after ' + name);
-      return { op: name, k, a };
+      const nd = { op: name, k, a }; if (o && op.centred) nd.o = o; return nd;
     }
-    if (OPS[t]) { if (OPS[t].arity || OPS[t].k.length) throw new Error('"' + t + '" needs parentheses'); return { op: t, k: [], a: [] }; }
+    const [bare, o] = splitOff(t);
+    if (OPS[bare]) {
+      if (OPS[bare].arity || OPS[bare].k.length) throw new Error('"' + bare + '" needs parentheses');
+      const nd = { op: bare, k: [], a: [] }; if (o && OPS[bare].centred) nd.o = o; return nd;
+    }
     return { op: 'c', k: [num(t)], a: [] };
   }
   const t = node();
@@ -1004,7 +1068,7 @@ class Evolver {
   tour(isl, k = 3) { let b = null; for (let i = 0; i < k; i++) { const p = isl.pop[randi(isl.pop.length)]; if (!b || p.fit < b.fit) b = p; } return b; }
   child(isl) {
     const r = rnd();
-    if (r < this.tune) { const t = clone(isl.best.tree), ns = collect(t).filter((x) => x.node.k.length); if (ns.length) { jitterConsts(ns[randi(ns.length)].node, 0.3); return t; } }
+    if (r < this.tune) { const t = clone(isl.best.tree), ns = collect(t).filter((x) => x.node.k.length || x.node.o); if (ns.length) { jitterConsts(ns[randi(ns.length)].node, 0.3); return t; } }
     if (r < this.tune + 0.3) { const c = crossover(this.tour(isl).tree, this.tour(isl).tree, this.maxNodes); return rnd() < 0.4 ? mutate(c, 0.4, this.maxNodes) : c; }
     if (r < 0.96) return mutate(this.tour(isl).tree, 0.5, this.maxNodes);
     return randomInteresting(5);
@@ -1088,7 +1152,7 @@ class Evolver {
 }
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
-const GP = { OPS, TERMS, FUNCS, FAMILIES, setEnabled, setFamily, setAllEnabled, enabledNames, evaluate, release, toRGBA, randTree, randomInteresting, mutate, mutants, offspring, crossover, clone, size, depth,
+const GP = { setOffsetRate, getOffsetRate, OPS, TERMS, FUNCS, FAMILIES, setEnabled, setFamily, setAllEnabled, enabledNames, evaluate, release, toRGBA, randTree, randomInteresting, mutate, mutants, offspring, crossover, clone, size, depth,
   toString, pretty, parse, signature, sigStd, sigDist, Target, distance, bake, METRICS, DEFAULT_WEIGHTS, Evolver, noise2,
   setRandom: (f) => { rnd = f; }, seedRandom: (s) => { rnd = mulberry32(s); }, useMathRandom: () => { rnd = Math.random; } };
 if (typeof module !== 'undefined' && module.exports) module.exports = GP; else root.GP = GP;
