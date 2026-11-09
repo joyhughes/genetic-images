@@ -60,8 +60,15 @@ let history = [];
 let busy = false;
 const amt = () => +$('amt').value;
 
-// Every new centre is recorded for the movie maker (movie.js).
-let lineage = [];
+// Every new centre is recorded (movie maker, run library). linRec describes the current lineage
+// as a saved run; a new one starts with each "New random 9" or when branching from a saved image.
+let lineage = [], linRec = null;
+function newLineageRun(parent, prefix) {
+  linRec = { id: Library.uid(), kind: 'lineage', title: parent ? 'Branch of ' + parent.title.replace(/^Branch of /, '') : 'Interactive lineage',
+    created: Date.now(), parent: parent || null };
+  lineage = prefix || [];
+  store.set('gi.linRun', JSON.stringify(linRec));
+}
 function noteCentre() {
   if (!cells[4]) return;
   const s = GP.toString(cells[4]);
@@ -87,6 +94,7 @@ function renderAll(anim) {
 }
 function randomNine() {
   if (cells[0]) history.push(cells.map((t) => GP.toString(t)));
+  newLineageRun();
   cells = Array.from({ length: 9 }, () => GP.randomInteresting(6));
   renderAll(false); showGenome(); save();
 }
@@ -284,6 +292,7 @@ $('tabA').onclick = () => setMode('A');
 function makeSrcCanvas() { const c = document.createElement('canvas'); c.width = c.height = tgtSize; return c; }
 function setTargetCanvas(c, name) {
   targetSrc = c; targetName = name;
+  { const s = document.createElement('canvas'); s.width = s.height = 256; const g = s.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(c, 0, 0, 256, 256); targetURL = s.toDataURL('image/jpeg', 0.92); }
   const t = $('tgtC').getContext('2d'); t.imageSmoothingQuality = 'high'; t.drawImage(c, 0, 0, $('tgtC').width, $('tgtC').height);
   rebuildTarget(); resetEvo();
 }
@@ -345,6 +354,9 @@ for (const el of [drop, document.body]) {
 
 // Every new best of the run is recorded for the movie maker; thinned if a run gets very long.
 let runReel = [], runLast = null;
+// autoRec describes the current auto-evolve run as a saved run (one per reset / target);
+// pendingBranch = { rec, k } makes the next reset continue from image k of a saved run.
+let autoRec = null, pendingBranch = null, targetURL = null;
 function noteRun() {
   if (!evo || evo.best === runLast) return;
   runLast = evo.best;
@@ -362,7 +374,17 @@ function resetEvo() {
   evo = new GP.Evolver(target, { popSize: pop, islands: +$('islands').value, parsimony: +$('pars').value * PARS_UNIT,
     migrateEvery: +$('migr').value * pop, mateEvery: +$('mateEv').value * pop });
   const seeds = [];
-  if ($('seedC').checked) { const c = interactiveCenter(); if (c) { seeds.push(c); seeds.push(...GP.mutants(c, 8, 0.5)); } }
+  autoRec = { id: Library.uid(), kind: 'run', title: 'Auto-evolve → ' + targetName, targetName, created: Date.now(), parent: null, target: targetURL,
+    settings: { weights: Object.assign({}, weights), popSize: pop, islands: +$('islands').value, res: +$('res').value,
+      offsetRate: GP.getOffsetRate(), boxRate: GP.getBoxRate() } };
+  if (pendingBranch) {
+    const { rec, k } = pendingBranch, t = GP.parse(rec.steps[k].s);
+    seeds.push(t); seeds.push(...GP.mutants(t, 8, 0.4));
+    runReel = rec.steps.slice(0, k + 1).map((x) => Object.assign({}, x)); // keep the ancestry for the movie
+    autoRec.parent = { id: rec.id, step: k, title: rec.title };
+    autoRec.title = 'Branch of ' + rec.title.replace(/^Branch of /, '');
+    pendingBranch = null;
+  } else if ($('seedC').checked) { const c = interactiveCenter(); if (c) { seeds.push(c); seeds.push(...GP.mutants(c, 8, 0.5)); } }
   evo.seed(seeds); noteRun();
   evalMark = { t: performance.now(), n: 0, rate: 0 };
   showPopulation(true); drawBest(); updateStats();
@@ -573,28 +595,63 @@ function frame() {
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (Movie.isOpen()) { if (e.key === 'Escape') Movie.close(); return; }
+  if (Library.isOpen()) { if (e.key === 'Escape') Library.close(); return; }
   if (e.key === 'Escape') { if (!$('modal').classList.contains('hidden')) closeModal(); else clearPicks(); }
   else if (e.key === 'Backspace' && mode === 'I') { e.preventDefault(); back(); }
   else if (e.key === ' ' && mode === 'A') { e.preventDefault(); running ? stopAuto() : startAuto(); }
 });
 
+// ---------- recovering images from saved runs ----------
+let savedReel = [], savedTitle = '', savedTarget = null;
+async function canvasFromURL(url) {
+  const img = new Image(); img.src = url; await img.decode();
+  const c = makeSrcCanvas(), g = c.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(img, 0, 0, c.width, c.height);
+  return c;
+}
+function recoverBreed(rec, k) { // breed interactively from image k of a saved run, as a new branch
+  const tree = GP.parse(rec.steps[k].s);
+  if (mode === 'A') setMode('I', true);
+  if (cells[0]) history.push(cells.map((t) => GP.toString(t)));
+  newLineageRun({ id: rec.id, step: k, title: rec.title }, rec.steps.slice(0, k + 1).map((x) => Object.assign({}, x)));
+  drawTree(tree, tiles[4].cv); breedFrom(tree, true);
+  toast('Breeding from image ' + (k + 1) + ' of ' + rec.title);
+}
+async function recoverAuto(rec, k) { // evolve further toward the run's target, seeded with image k
+  let c; try { c = await canvasFromURL(rec.target); } catch (e) { toast('Could not load the saved target'); return; }
+  if (rec.settings && rec.settings.weights) { weights = Object.assign({}, weights, rec.settings.weights); syncWeightInputs(); store.set('gi.weights', JSON.stringify(weights)); }
+  setMode('A');
+  pendingBranch = { rec, k };
+  setTargetCanvas(c, rec.targetName || 'Saved target');
+  startAuto();
+  toast('Continuing from image ' + (k + 1) + ' of ' + rec.title);
+}
+
 // ---------- start ----------
 (function init() {
   try {
     const c = JSON.parse(store.get('gi.cells') || 'null'), h = JSON.parse(store.get('gi.history') || '[]');
-    const l = JSON.parse(store.get('gi.lineage') || '[]');
+    const l = JSON.parse(store.get('gi.lineage') || '[]'), lr = JSON.parse(store.get('gi.linRun') || 'null');
     if (Array.isArray(l)) lineage = l.filter((x) => x && typeof x.s === 'string');
+    if (lr && lr.id) linRec = lr; else newLineageRun(null, lineage);
     if (Array.isArray(c) && c.length === 9) { cells = c.map(GP.parse); history = Array.isArray(h) ? h : []; renderAll(false); showGenome(); }
     else randomNine();
   } catch (e) { history = []; randomNine(); }
   Movie.init({ GP, drawTree, saveFile, stamp, toast,
-    reels: () => ({ run: runReel, lineage }),
-    target: () => targetSrc,
+    reels: () => ({ run: runReel, lineage, saved: savedReel }),
+    target: (src) => (src === 'run' ? targetSrc : src === 'saved' ? savedTarget : null),
+    savedTitle: () => savedTitle,
     pause: () => { const was = running; stopAuto(); return was; },
     resume: (was) => { if (was && mode === 'A') startAuto(); } });
+  Library.init({ GP, Movie, drawTree, saveFile, stamp, toast, savePNG, copyText,
+    live: () => [autoRec && Object.assign({}, autoRec, { steps: runReel }), linRec && Object.assign({}, linRec, { steps: lineage })],
+    breedFrom: recoverBreed, continueAuto: recoverAuto,
+    useAsTarget: (t) => { setMode('A'); setTargetFromTree(t, 'Saved image'); },
+    movie: async (rec) => { savedReel = rec.steps; savedTitle = rec.title; savedTarget = rec.target ? await canvasFromURL(rec.target) : null; Movie.open('saved'); } });
+  $('libI').onclick = () => Library.open();
+  $('libA').onclick = () => Library.open();
   $('movieI').onclick = () => Movie.open('lineage');
   $('movieA').onclick = () => Movie.open('run');
-  window.gi = { get lineage() { return lineage; }, get runReel() { return runReel; }, get cells() { return cells; }, get evo() { return evo; }, choose, preset, startAuto, stopAuto, setMode, GP };
+  window.gi = { get lineage() { return lineage; }, get linRec() { return linRec; }, get autoRec() { return autoRec; }, recoverBreed, recoverAuto, get runReel() { return runReel; }, get cells() { return cells; }, get evo() { return evo; }, choose, preset, startAuto, stopAuto, setMode, GP };
   requestAnimationFrame(frame);
 })();
 })();

@@ -46,7 +46,7 @@ function plan(o) {
   const tr = o.trans === 'cut' || steps.length < 2 ? 0 : Math.max(1, Math.round(per * 0.55));
   const hold = per - tr, endHold = Math.round(o.fps * extra / 2);
   const total = steps.length ? steps.length * hold + (steps.length - 1) * tr + 2 * endHold : 0;
-  const tgt = o.src === 'run' && o.withTarget ? H.target() : null;
+  const tgt = o.src !== 'lineage' && o.withTarget ? H.target(o.src) : null;
   const S = o.size, W = tgt ? 2 * S : S;
   return { o, reel, steps, hold, tr, endHold, total, tgt, S, W, Hh: S };
 }
@@ -207,9 +207,10 @@ function refreshInfo() {
   const o = options(), reels = H.reels();
   for (const opt of $('mvSrc').options) {
     const n = (reels[opt.value] || []).length;
-    opt.textContent = (opt.value === 'run' ? 'Auto-evolve run' : 'Interactive lineage') + ` (${n} image${n === 1 ? '' : 's'})`;
+    opt.textContent = (opt.value === 'run' ? 'Auto-evolve run' : opt.value === 'lineage' ? 'Interactive lineage' : 'Saved: ' + (H.savedTitle() || 'run')) + ` (${n} image${n === 1 ? '' : 's'})`;
+    if (opt.value === 'saved') opt.hidden = !n;
   }
-  $('mvTgtRow').classList.toggle('hidden', o.src !== 'run');
+  $('mvTgtRow').classList.toggle('hidden', !H.target(o.src));
   const p = plan(o), n = p.reel.length;
   const ok = n >= 2;
   $('mvPlay').disabled = $('mvMake').disabled = !ok || !!busy;
@@ -219,7 +220,7 @@ function refreshInfo() {
       : 'Nothing recorded yet: pick a few images in Interactive mode and each new centre is kept for the movie.';
     return;
   }
-  const what = o.src === 'run' ? 'improvements' : 'centres';
+  const what = o.src === 'run' ? 'improvements' : o.src === 'lineage' ? 'centres' : 'images';
   const used = p.steps.length < n ? `${p.steps.length} spread evenly through them (raise the length or shorten the step time to use more)` : `all ${n}`;
   const morphs = o.trans === 'morph' ? p.steps.slice(1).filter((s, i) => s.shape === p.steps[i].shape).length : 0;
   $('mvInfo').textContent = `${n} ${what} recorded; using ${used}. ` +
@@ -267,7 +268,7 @@ async function make() {
     $('mvProg').textContent = `done: ${(blob.size / 1e6).toFixed(1)} MB ${ext.toUpperCase()}, ${(p.total / o.fps).toFixed(1)} s` +
       (cfg ? '' : ' (recorded in real time; this browser has no WebCodecs H.264 encoder)');
     root.Movie.last = blob;
-    await H.saveFile(blob, 'genetic-images-' + (o.src === 'run' ? 'evolution' : 'lineage') + '-' + H.stamp() + '.' + ext);
+    await H.saveFile(blob, 'genetic-images-' + (o.src === 'lineage' ? 'lineage' : 'evolution') + '-' + H.stamp() + '.' + ext);
   } catch (e) { $('mvProg').textContent = job.cancel ? 'stopped' : 'failed: ' + (e && e.message || e); }
   setBusy(null); H.resume(resume);
 }

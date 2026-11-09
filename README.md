@@ -25,6 +25,19 @@ Open `index.html` through any static server (`python3 -m http.server`), no build
   (`ctx.memo`). Mutation moves, resizes and softens boxes, and adds and removes them. On the sunset
   benchmark (6 seeds, 20 s) boxes didn't improve the match: mean RMSE 0.060 without, 0.062 at
   15% (within noise), 0.086 at 35%. They're for the look, not the fit.
+- **Saved runs** (📚 in either pane): every interactive lineage (a new one per "New random 9") and
+  every auto-evolve run (a new one per reset or target) saves itself every 3 s and when the page is
+  hidden, to IndexedDB (falling back to localStorage, then memory). Each run stores every genome
+  plus captions; auto runs also keep the target (256 px JPEG) and settings. A 67-image run is about
+  25 KB. The browser lists runs. Pick one, then any image (thumbnails and a slider reaching every
+  step; ← → keys), and you can:
+  - **Breed from this image**: interactive mode, as a new lineage branching at that image.
+  - **Continue auto-evolve from here**: reloads the run's target and weights, and seeds the
+    population with the image and its mutants.
+  - Use it as the target, save a PNG, copy the genome, or make a movie of the run.
+
+  Branches keep the images up to the branch point, so their movies show the whole ancestry.
+  Export all / Import move runs between browsers as JSON.
 - **Movies** (🎬 in either mode): every new centre you pick, and every new best of an auto-evolve
   run, is recorded. The movie steps through them (thinned evenly to the length you choose).
   Consecutive genomes with the same tree shape morph by interpolating their constants frame by

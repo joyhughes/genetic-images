@@ -84,6 +84,26 @@
   .offhead { color: var(--ink) !important; font-size: 13px !important; display: flex; gap: 7px; align-items: center; cursor: pointer; }
   .offbox code { font-size: 11px; color: #cfe3c8; }
   .opsl .cen { color: var(--acc); font-size: 11px; }
+  #lib { position: fixed; inset: 0; background: #000d; z-index: 20; display: flex; align-items: center; justify-content: center; padding: 20px; }
+  .libbox { width: min(1300px, 96vw); height: min(860px, 92vh); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; display: grid; grid-template-columns: 320px 1fr; overflow: hidden; }
+  .libl { border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 14px; min-height: 0; }
+  .libl h3 { margin: 0 0 4px; font-size: 16px; }
+  #libList { flex: 1; overflow-y: auto; margin: 6px 0; }
+  .librow { display: flex; gap: 10px; align-items: center; padding: 6px; border-radius: 5px; cursor: pointer; }
+  .librow:hover { background: #24272d; } .librow.on { background: #33302a; box-shadow: inset 0 0 0 1px var(--acc); }
+  .librow canvas { width: 48px; height: 48px; border-radius: 3px; flex: none; background: #000; }
+  .libtxt { min-width: 0; } .libt { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .libs { font-size: 11px; color: var(--dim); }
+  .libr { display: flex; flex-direction: column; padding: 14px; min-width: 0; min-height: 0; gap: 8px; }
+  .libhead { display: flex; gap: 8px; align-items: center; } .libhead #libTitle { flex: 1; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #libDetail { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
+  #libStrip { display: flex; flex-wrap: wrap; gap: 4px; overflow-y: auto; max-height: 34%; align-content: flex-start; }
+  #libStrip canvas { width: 56px; height: 56px; border-radius: 3px; cursor: pointer; background: #000; }
+  #libStrip canvas.on { outline: 2px solid var(--acc); outline-offset: 1px; }
+  .libsel { display: flex; gap: 14px; min-height: 0; flex: 1; }
+  #libBig { width: min(44vh, 400px); height: min(44vh, 400px); border-radius: 5px; background: #000; flex: none; }
+  .libside { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .libside textarea { flex: 1; min-height: 80px; height: auto; }
+  #libCap { font: 12px ui-monospace, monospace; color: var(--acc); }
 </style>
 </head>
 <body>
@@ -107,7 +127,7 @@
     <label>Centre genome (editable)</label>
     <textarea id="geno" spellcheck="false"></textarea>
     <div class="row"><button id="apply">Use this genome</button><button id="copy">Copy</button><button id="saveC">Save centre PNG</button></div>
-    <div class="row"><button id="movieI">🎬 Make a movie of this lineage</button></div>
+    <div class="row"><button id="movieI">🎬 Make a movie of this lineage</button><button id="libI">📚 Saved runs</button></div>
   </section>
 
   <section id="paneA" class="hidden">
@@ -135,7 +155,7 @@
       <button id="reset">Reset population</button>
       <button id="saveBest">Save best PNG</button>
     </div>
-    <div class="row"><button id="movieA" style="flex:1">🎬 Make a movie of this run</button></div>
+    <div class="row"><button id="movieA" style="flex:1">🎬 Make a movie of this run</button><button id="libA">📚 Saved runs</button></div>
     <h3 class="wh">Match weights</h3>
     <div class="help" style="margin-top:0">Each measure is scored relative to a flat image of the target's average colour (0 = perfect, 1 = no better than flat); the match error is their weighted mean. Changing weights re-scores the whole population.</div>
     <div class="row"><button data-wpreset="colour">Colour only</button><button data-wpreset="balanced">Balanced</button><button data-wpreset="feel">Look &amp; feel</button><button data-wpreset="shape">Shape</button></div>
@@ -196,7 +216,7 @@
   <div class="side">
     <h3>🎬 Movie of the evolution</h3>
     <div class="help" style="margin:0">Every new best of an auto-evolve run, and every new centre you pick in Interactive mode, is recorded. The movie steps through them, morphing smoothly where two genomes share a tree shape.</div>
-    <label>Source <select id="mvSrc"><option value="run">Auto-evolve run</option><option value="lineage">Interactive lineage</option></select></label>
+    <label>Source <select id="mvSrc"><option value="run">Auto-evolve run</option><option value="lineage">Interactive lineage</option><option value="saved" hidden>Saved run</option></select></label>
     <label>Seconds per step <select id="mvSec"><option value="0.2">0.2</option><option value="0.4">0.4</option><option value="0.7" selected>0.7</option><option value="1.2">1.2</option><option value="2">2</option><option value="3">3</option></select></label>
     <label>Longest movie <select id="mvMax"><option value="10">10 s</option><option value="20">20 s</option><option value="30" selected>30 s</option><option value="60">1 min</option><option value="120">2 min</option><option value="300">5 min</option></select></label>
     <label>Transition <select id="mvTr"><option value="morph" selected>Morph / crossfade</option><option value="fade">Crossfade</option><option value="cut">Cut</option></select></label>
@@ -209,9 +229,40 @@
     <div id="mvProg"></div>
   </div>
 </div>
+<div id="lib" class="hidden">
+  <div class="libbox">
+    <div class="libl">
+      <h3>📚 Saved runs</h3>
+      <div class="help" style="margin:0">Every interactive lineage and auto-evolve run saves itself as it goes. Pick a run, then any image in it, to carry on from there.</div>
+      <div id="libInfo" class="help" style="margin:6px 0 0"></div>
+      <div id="libList"></div>
+      <div class="row"><button id="libExport">Export all…</button><button id="libImport">Import…</button><input id="libFile" type="file" accept=".json,application/json" class="hidden"></div>
+    </div>
+    <div class="libr">
+      <div class="libhead"><span id="libTitle"></span><button id="libMovie">🎬 Movie</button><button id="libDel">Delete run</button><button id="libClose">Close (Esc)</button></div>
+      <div id="libEmpty" class="help hidden">Nothing saved yet.</div>
+      <div id="libDetail">
+        <div id="libStrip"></div>
+        <div id="libStripNote" class="help" style="margin:0"></div>
+        <input id="libK" type="range" min="0" max="0" step="1" value="0" title="Every image of the run (← → keys)">
+        <div class="libsel">
+          <canvas id="libBig" width="400" height="400"></canvas>
+          <div class="libside">
+            <div id="libCap"></div>
+            <textarea id="libGeno" spellcheck="false" readonly></textarea>
+            <div class="row"><button id="libBreed">✋ Breed from this image</button><button id="libContinue">⚙ Continue auto-evolve from here</button></div>
+            <div class="row"><button id="libTarget">Use as target</button><button id="libPng">Save PNG</button><button id="libCopy">Copy genome</button></div>
+            <div class="help" style="margin:0">Breeding or continuing starts a new run that branches from this one: it keeps the images up to here, so its movie shows the whole ancestry.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 <div id="toast"></div>
 <script src="gp.js"></script>
 <script src="movie.js"></script>
+<script src="library.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
