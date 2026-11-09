@@ -25,19 +25,28 @@ Open `index.html` through any static server (`python3 -m http.server`), no build
   (`ctx.memo`). Mutation moves, resizes and softens boxes, and adds and removes them. On the sunset
   benchmark (6 seeds, 20 s) boxes didn't improve the match: mean RMSE 0.060 without, 0.062 at
   15% (within noise), 0.086 at 35%. They're for the look, not the fit.
-- **Saved runs** (📚 in either pane): every interactive lineage (a new one per "New random 9") and
-  every auto-evolve run (a new one per reset or target) saves itself every 3 s and when the page is
-  hidden, to IndexedDB (falling back to localStorage, then memory). Each run stores every genome
-  plus captions; auto runs also keep the target (256 px JPEG) and settings. A 67-image run is about
-  25 KB. The browser lists runs. Pick one, then any image (thumbnails and a slider reaching every
-  step; ← → keys), and you can:
-  - **Breed from this image**: interactive mode, as a new lineage branching at that image.
-  - **Continue auto-evolve from here**: reloads the run's target and weights, and seeds the
-    population with the image and its mutants.
-  - Use it as the target, save a PNG, copy the genome, or make a movie of the run.
+- **Interactive sessions are trees**: every grid of nine you are shown is a node (centre + the 8
+  offered). ← Back / Forward → (or the arrow keys) move along it without losing anything; choosing
+  a different image after going back starts a branch. Tiles you already took show "↳ explored".
+- **Saved runs** (📚 in either pane): each interactive tree (a new one per "New random 9") and
+  each auto-evolve run (a new one per reset or target) saves itself every 3 s and when the page is
+  hidden. Storage is IndexedDB, falling back to localStorage, then memory. The browser shows:
+  - a tree overview of the run (click any node);
+  - the current branch as a strip, plus a slider (← → step along it, ↑ ↓ switch branches);
+  - the grid of nine at the selected step, where ↳ tiles were taken (click to follow that branch).
 
-  Branches keep the images up to the branch point, so their movies show the whole ancestry.
-  Export all / Import move runs between browsers as JSON.
+  From any step you can:
+  - **Resume** in Interactive mode with that exact grid.
+  - Select an image you didn't take and **breed from it**. This adds a new branch to the same tree.
+  - **Continue auto-evolve** from an image of an auto run: reloads its target and weights, and
+    seeds the population with the image and its mutants.
+  - Use it as the target, save a PNG, copy the genome, or make a movie of the branch.
+
+  Auto runs are chains of improving bests; breeding from one starts a new tree whose trunk is that
+  run. Export all / Import move runs between browsers as JSON.
+- **Big PNGs**: 1024 to 8192 px. Genomes without image filters render in horizontal strips
+  (bounded memory; an 8192² swirl took ~9 s including PNG encoding). Genomes with filters (blur,
+  edges, emboss…) need the whole pixel grid at once, so they're capped at 4096.
 - **Movies** (🎬 in either mode): every new centre you pick, and every new best of an auto-evolve
   run, is recorded. The movie steps through them (thinned evenly to the length you choose).
   Consecutive genomes with the same tree shape morph by interpolating their constants frame by

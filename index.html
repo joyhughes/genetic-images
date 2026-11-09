@@ -96,11 +96,25 @@
   .libr { display: flex; flex-direction: column; padding: 14px; min-width: 0; min-height: 0; gap: 8px; }
   .libhead { display: flex; gap: 8px; align-items: center; } .libhead #libTitle { flex: 1; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #libDetail { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
-  #libStrip { display: flex; flex-wrap: wrap; gap: 4px; overflow-y: auto; max-height: 34%; align-content: flex-start; }
-  #libStrip canvas { width: 56px; height: 56px; border-radius: 3px; cursor: pointer; background: #000; }
-  #libStrip canvas.on { outline: 2px solid var(--acc); outline-offset: 1px; }
+  #libTreeWrap { overflow: auto; max-height: 150px; min-height: 40px; background: #121316; border-radius: 5px; padding: 4px; flex: none; }
+  #libTree .e { fill: none; stroke: #4a4d55; stroke-width: 1.2; } #libTree .e.hot { stroke: var(--acc); stroke-width: 2; }
+  #libTree circle { fill: #6b6e76; cursor: pointer; } #libTree circle.fork { fill: #b9bcc4; } #libTree circle.hot { fill: var(--acc); }
+  #libTree circle.sel { fill: #fff; stroke: var(--acc); stroke-width: 2; }
+  #libStrip { display: flex; gap: 4px; overflow-x: auto; flex: none; padding-bottom: 4px; }
+  #libStrip .lth { position: relative; flex: none; cursor: pointer; }
+  #libStrip canvas { width: 52px; height: 52px; border-radius: 3px; background: #000; display: block; }
+  #libStrip .lth.on canvas { outline: 2px solid var(--acc); outline-offset: 1px; }
+  #libStrip .fork { position: absolute; right: 2px; top: 2px; font: 10px ui-monospace, monospace; background: #000b; color: #fff; padding: 0 3px; border-radius: 3px; }
+  .libnav { display: flex; gap: 6px; align-items: center; } .libnav input { flex: 1; } #libPos { font-size: 12px; color: var(--dim); white-space: nowrap; }
+  #libGrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; width: min(42vh, 380px); flex: none; align-content: start; }
+  #libGrid.single { grid-template-columns: 1fr; }
+  #libGrid .lgt { position: relative; cursor: pointer; border-radius: 4px; }
+  #libGrid canvas { width: 100%; aspect-ratio: 1; display: block; border-radius: 4px; background: #000; }
+  #libGrid .lgt.centre canvas { box-shadow: 0 0 0 2px #fff6; }
+  #libGrid .lgt.taken canvas { box-shadow: 0 0 0 2px #5fa8ff; } #libGrid .lgt.next canvas { box-shadow: 0 0 0 3px var(--acc); }
+  #libGrid .lgt.sel { outline: 3px solid #ff5c8a; outline-offset: 2px; }
+  #libGrid .tk { position: absolute; left: 4px; bottom: 4px; font: 11px ui-monospace, monospace; background: #000b; color: #9fd0ff; padding: 0 4px; border-radius: 3px; }
   .libsel { display: flex; gap: 14px; min-height: 0; flex: 1; }
-  #libBig { width: min(44vh, 400px); height: min(44vh, 400px); border-radius: 5px; background: #000; flex: none; }
   .libside { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
   .libside textarea { flex: 1; min-height: 80px; height: auto; }
   #libCap { font: 12px ui-monospace, monospace; color: var(--acc); }
@@ -120,13 +134,14 @@
     <label>Mutation amount <span id="amtv"></span></label>
     <input id="amt" type="range" min="0.05" max="1" step="0.05" value="0.5">
     <div class="row">
-      <button id="back" title="Backspace">← Back</button>
+      <button id="back" title="Backspace or ←">← Back</button>
+      <button id="fwd" title="→">Forward →</button>
       <button id="rand">New random 9</button>
       <button id="bigC">⤢ Centre</button>
     </div>
     <label>Centre genome (editable)</label>
     <textarea id="geno" spellcheck="false"></textarea>
-    <div class="row"><button id="apply">Use this genome</button><button id="copy">Copy</button><button id="saveC">Save centre PNG</button></div>
+    <div class="row"><button id="apply">Use this genome</button><button id="copy">Copy</button><button id="saveC">Save centre PNG</button><select id="saveSize" title="PNG size"><option value="1024">1024 px</option><option value="2048" selected>2048 px</option><option value="4096">4096 px</option><option value="8192">8192 px</option></select></div>
     <div class="row"><button id="movieI">🎬 Make a movie of this lineage</button><button id="libI">📚 Saved runs</button></div>
   </section>
 
@@ -153,7 +168,7 @@
     <div class="row">
       <button id="run" style="flex:1">▶ Start</button>
       <button id="reset">Reset population</button>
-      <button id="saveBest">Save best PNG</button>
+      <button id="saveBest">Save best PNG</button><select id="saveSizeA" title="PNG size"><option value="1024">1024 px</option><option value="2048" selected>2048 px</option><option value="4096">4096 px</option><option value="8192">8192 px</option></select>
     </div>
     <div class="row"><button id="movieA" style="flex:1">🎬 Make a movie of this run</button><button id="libA">📚 Saved runs</button></div>
     <h3 class="wh">Match weights</h3>
@@ -203,7 +218,7 @@
       <button id="bigTarget">Use as target</button>
     </div>
     <div class="row">
-      <select id="bigSize"><option value="1024">1024 px</option><option value="2048">2048 px</option><option value="512">512 px</option></select>
+      <select id="bigSize"><option value="1024">1024 px</option><option value="2048">2048 px</option><option value="4096">4096 px</option><option value="8192">8192 px</option><option value="512">512 px</option></select>
       <button id="bigSave">Save PNG</button>
       <button id="bigSaveTxt">Save genome</button>
       <button id="bigCopy">Copy genome</button>
@@ -242,17 +257,18 @@
       <div class="libhead"><span id="libTitle"></span><button id="libMovie">🎬 Movie</button><button id="libDel">Delete run</button><button id="libClose">Close (Esc)</button></div>
       <div id="libEmpty" class="help hidden">Nothing saved yet.</div>
       <div id="libDetail">
+        <div id="libTreeWrap" title="The run as a tree: click any dot. Highlighted = the branch shown below; larger dots = forks."><svg id="libTree"></svg></div>
         <div id="libStrip"></div>
         <div id="libStripNote" class="help" style="margin:0"></div>
-        <input id="libK" type="range" min="0" max="0" step="1" value="0" title="Every image of the run (← → keys)">
+        <div class="libnav"><button id="libPrev" title="←">◀</button><input id="libK" type="range" min="0" max="0" step="1" value="0"><button id="libNext" title="→">▶</button><span id="libPos"></span></div>
         <div class="libsel">
-          <canvas id="libBig" width="400" height="400"></canvas>
+          <div id="libGrid"></div>
           <div class="libside">
             <div id="libCap"></div>
             <textarea id="libGeno" spellcheck="false" readonly></textarea>
-            <div class="row"><button id="libBreed">✋ Breed from this image</button><button id="libContinue">⚙ Continue auto-evolve from here</button></div>
+            <div class="row"><button id="libResume">▶ Resume at this step</button><button id="libBreed">✋ Breed from this image</button><button id="libContinue">⚙ Continue auto-evolve from here</button></div>
             <div class="row"><button id="libTarget">Use as target</button><button id="libPng">Save PNG</button><button id="libCopy">Copy genome</button></div>
-            <div class="help" style="margin:0">Breeding or continuing starts a new run that branches from this one: it keeps the images up to here, so its movie shows the whole ancestry.</div>
+            <div class="help" style="margin:0">The grid is what you were shown at this step. ↳ marks images you took (click to follow that branch); pick any other and breed from it to explore the road not taken. Resume puts this exact grid back in Interactive mode. ← → step along the branch, ↑ ↓ switch between branches. Nothing is ever overwritten: new choices add branches to the same tree.</div>
           </div>
         </div>
       </div>

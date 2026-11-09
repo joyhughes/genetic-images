@@ -56,33 +56,68 @@ function toast(msg) { const t = $('toast'); t.textContent = msg; t.classList.add
 
 // ---------- interactive state ----------
 let cells = new Array(9).fill(null);
-let history = [];
 let busy = false;
 const amt = () => +$('amt').value;
 
-// Every new centre is recorded (movie maker, run library). linRec describes the current lineage
-// as a saved run; a new one starts with each "New random 9" or when branching from a saved image.
-let lineage = [], linRec = null;
-function newLineageRun(parent, prefix) {
-  linRec = { id: Library.uid(), kind: 'lineage', title: parent ? 'Branch of ' + parent.title.replace(/^Branch of /, '') : 'Interactive lineage',
-    created: Date.now(), parent: parent || null };
-  lineage = prefix || [];
-  store.set('gi.linRun', JSON.stringify(linRec));
+// The interactive session is a tree, saved as one run (run library). Each node is a grid of nine
+// the user was shown: { p: parent index, d: depth, s: centre genome, grid: [9 genomes], cap, last:
+// most recently visited child }. Back/Forward move the head; choosing an image adds a child of the
+// head, so going back and choosing differently starts a branch instead of losing anything.
+let itree = null;
+function newTree(parent, prefix) {
+  itree = { id: Library.uid(), kind: 'lineage', title: parent ? 'Branch of ' + parent.title.replace(/^Branch of /, '') : 'Interactive lineage',
+    created: Date.now(), parent: parent || null, nodes: [], head: -1 };
+  (prefix || []).forEach((st, i) => itree.nodes.push({ p: i - 1, d: i, s: st.s, cap: st.cap, grid: null }));
+  itree.head = itree.nodes.length - 1;
+  storeTreeRef();
 }
-function noteCentre() {
-  if (!cells[4]) return;
-  const s = GP.toString(cells[4]);
-  if (lineage.length && lineage[lineage.length - 1].s === s) return;
-  lineage.push({ s, cap: 'generation ' + lineage.length });
-  if (lineage.length > 1500) lineage.splice(1, 1);
+const storeTreeRef = () => store.set('gi.tree', JSON.stringify({ id: itree.id, head: itree.head }));
+const childrenOf = (i) => { const out = []; itree.nodes.forEach((n, j) => { if (n.p === i) out.push(j); }); return out; };
+function addNode(how) {
+  const grid = cells.map((t) => GP.toString(t)), p = itree.head, d = p >= 0 ? itree.nodes[p].d + 1 : 0;
+  itree.nodes.push({ p, d, s: grid[4], grid, cap: 'generation ' + d + (how ? ' (' + how + ')' : '') });
+  if (p >= 0) itree.nodes[p].last = itree.nodes.length - 1;
+  itree.head = itree.nodes.length - 1; storeTreeRef();
+}
+function pathTo(i) { const out = []; for (; i >= 0; i = itree.nodes[i].p) out.push(itree.nodes[i]); return out.reverse(); }
+const lineagePath = () => (itree && itree.head >= 0 ? pathTo(itree.head).map((n) => ({ s: n.s, cap: n.cap })) : []);
+function moveTo(i) { // show node i's grid exactly as it was (gridless nodes, e.g. from an auto run, get fresh mutants)
+  const n = itree.nodes[i]; if (!n) return;
+  if (!n.grid) { const c = GP.parse(n.s), kids = GP.mutants(c, 8, amt()); n.grid = [0, 1, 2, 3, 4, 5, 6, 7, 8].map((j) => (j === 4 ? n.s : GP.toString(kids[j < 4 ? j : j - 1]))); }
+  if (n.p >= 0) itree.nodes[n.p].last = i;
+  itree.head = i; storeTreeRef();
+  cells = n.grid.map(GP.parse); renderAll(false); showGenome(); save();
+}
+function forward() {
+  if (busy || !itree) return;
+  const kids = childrenOf(itree.head); if (!kids.length) return;
+  const n = itree.nodes[itree.head]; moveTo(kids.includes(n.last) ? n.last : kids[kids.length - 1]);
 }
 function save() {
-  noteCentre();
-  store.set('gi.lineage', JSON.stringify(lineage.slice(-300)));
   store.set('gi.cells', JSON.stringify(cells.map((t) => GP.toString(t))));
-  store.set('gi.history', JSON.stringify(history.slice(-40)));
 }
-function showGenome() { $('geno').value = cells[4] ? GP.pretty(cells[4]) : ''; $('back').disabled = !history.length; }
+// Tiles already taken from this grid (their branch is in the tree) get a ↳ badge.
+function markExplored() {
+  if (mode !== 'I' || !itree || itree.head < 0) return;
+  const kidsOf = new Map(); itree.nodes.forEach((n, j) => { if (!kidsOf.has(n.p)) kidsOf.set(n.p, []); kidsOf.get(n.p).push(j); });
+  const taken = new Map();
+  for (const k of kidsOf.get(itree.head) || []) {
+    let size = 0; const stack = [k];
+    while (stack.length) { const x = stack.pop(); size++; stack.push(...(kidsOf.get(x) || [])); }
+    taken.set(itree.nodes[k].s, (taken.get(itree.nodes[k].s) || 0) + size);
+  }
+  for (let i = 0; i < 9; i++) {
+    const t = tiles[i], n = cells[i] && taken.get(GP.toString(cells[i]));
+    if (n) { t.badge.textContent = '↳ explored · ' + n + ' step' + (n > 1 ? 's' : ''); t.badge.style.display = 'block'; }
+    else t.badge.style.display = 'none';
+  }
+}
+function showGenome() {
+  $('geno').value = cells[4] ? GP.pretty(cells[4]) : '';
+  const h = itree && itree.nodes[itree.head];
+  $('back').disabled = !h || h.p < 0; $('fwd').disabled = !h || !childrenOf(itree.head).length;
+  setTimeout(markExplored, 0);
+}
 function renderAll(anim) {
   if (picks.length) clearPicks();
   cancelRenders();
@@ -93,9 +128,8 @@ function renderAll(anim) {
   }
 }
 function randomNine() {
-  if (cells[0]) history.push(cells.map((t) => GP.toString(t)));
-  newLineageRun();
   cells = Array.from({ length: 9 }, () => GP.randomInteresting(6));
+  newTree(); addNode();
   renderAll(false); showGenome(); save();
 }
 function breedFrom(parent, anim) {
@@ -107,7 +141,7 @@ function breedFrom(parent, anim) {
   CHILD_CELLS.forEach((c) => { tiles[c].el.style.opacity = '0'; tiles[c].badge.style.display = 'none'; });
   tiles[4].badge.style.display = 'none';
   CHILD_CELLS.forEach((c) => enqueue(() => { drawTree(cells[c], tiles[c].cv); if (anim) emerge(c); else tiles[c].el.style.opacity = '1'; }));
-  showGenome(); save();
+  addNode(); showGenome(); save();
 }
 function flyToCenter(i, done) {
   const src = tiles[i], a = src.el.getBoundingClientRect(), c = tiles[4].el.getBoundingClientRect();
@@ -129,17 +163,14 @@ function flyToCenter(i, done) {
 }
 function choose(i) {
   if (busy || !cells[i]) return;
-  history.push(cells.map((t) => GP.toString(t)));
   const parent = cells[i];
   if (i === 4) { breedFrom(parent, true); return; }
   busy = true; cancelRenders();
   flyToCenter(i, () => { busy = false; breedFrom(parent, true); });
 }
 function back() {
-  if (busy || !history.length) return;
-  cells = history.pop().map(GP.parse);
-  if (lineage.length > 1) lineage.pop();
-  renderAll(false); showGenome(); save();
+  if (busy || !itree) return;
+  const h = itree.nodes[itree.head]; if (h && h.p >= 0) moveTo(h.p);
 }
 function onTileClick(i) {
   if (mode === 'A') {
@@ -183,7 +214,6 @@ function mateNow() {
     clearPicks(); shown.fill(''); showPopulation(true); drawBest(); updateStats();
     return;
   }
-  history.push(cells.map((t) => GP.toString(t)));
   const kids = GP.offspring(A.tree, B.tree, 8, amt());
   clearPicks();
   cells[4] = A.tree; CHILD_CELLS.forEach((c, j) => { cells[c] = kids[j]; });
@@ -191,7 +221,7 @@ function mateNow() {
   for (const t of tiles) t.badge.style.display = 'none';
   drawTree(cells[4], tiles[4].cv); tiles[4].el.style.opacity = '1';
   CHILD_CELLS.forEach((c) => { tiles[c].el.style.opacity = '0'; enqueue(() => { drawTree(cells[c], tiles[c].cv); emerge(c); }); });
-  showGenome(); save();
+  addNode('mated'); showGenome(); save();
 }
 $('mateGo').onclick = mateNow;
 $('mateClear').onclick = clearPicks;
@@ -216,7 +246,6 @@ $('bigCopy').onclick = () => modalTree && copyText(GP.toString(modalTree, 6));
 $('bigParent').onclick = () => {
   if (!modalTree) return; const t = modalTree; closeModal();
   if (mode === 'A') { stopAuto(); setMode('I', true); }
-  history.push(cells.map((x) => GP.toString(x)));
   drawTree(t, tiles[4].cv); breedFrom(t, true);
 };
 $('bigTarget').onclick = () => { if (!modalTree) return; const t = modalTree; closeModal(); setMode('A'); setTargetFromTree(t, 'Chosen image'); };
@@ -239,27 +268,50 @@ async function saveFile(blob, name) {
   document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 10000);
   toast('Saved ' + name);
 }
-function savePNG(tree, size = 1024) {
-  if (!tree) return;
-  toast('Rendering ' + size + '×' + size + '…');
-  setTimeout(() => {
-    const c = document.createElement('canvas'); c.width = c.height = size; drawTree(tree, c);
-    c.toBlob((b) => saveFile(b, 'genetic-image-' + stamp() + '.png'), 'image/png');
-  }, 30);
+// Big PNGs render in horizontal strips (bounded memory, progress shown). Genomes with image filters
+// need the whole grid at once, so they render in one go and are capped at 4096 px.
+let saving = false;
+async function savePNG(tree, size = 2048) {
+  if (!tree || saving) return;
+  if (size > 4096 && GP.usesScreen(tree)) { toast('This genome uses image filters (blur, edges…), which need the whole image at once: saving at 4096 px'); size = 4096; await new Promise((r) => setTimeout(r, 1200)); }
+  saving = true;
+  try {
+    const c = document.createElement('canvas'); c.width = c.height = size; const g = c.getContext('2d');
+    toast('Rendering ' + size + '×' + size + '…'); await new Promise((r) => setTimeout(r, 30));
+    if (GP.usesScreen(tree)) drawTree(tree, c);
+    else {
+      const rows = Math.max(4, Math.floor((1 << 20) / size) & ~3), n0 = size * size;
+      for (let y0 = 0; y0 < size; y0 += rows) {
+        const h = Math.min(rows, size - y0), n = size * h, b = GP.evaluateRows(tree, size, y0, h), img = g.createImageData(size, h), d = img.data;
+        for (let i = 0; i < n; i++) { d[i * 4] = (b[i] + 1) * 127.5; d[i * 4 + 1] = (b[i + n] + 1) * 127.5; d[i * 4 + 2] = (b[i + 2 * n] + 1) * 127.5; d[i * 4 + 3] = 255; }
+        GP.release(b); g.putImageData(img, 0, y0);
+        if (size >= 2048) { toast(`Rendering ${size}×${size}… ${Math.round(100 * (y0 + h) * size / n0)}%`); await new Promise((r) => setTimeout(r, 0)); }
+      }
+    }
+    GP.clearPool();
+    toast('Encoding PNG…'); await new Promise((r) => setTimeout(r, 30));
+    const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+    if (!blob) throw new Error('the browser could not encode an image this large');
+    await saveFile(blob, 'genetic-image-' + stamp() + '-' + size + '.png');
+  } catch (e) { GP.clearPool(); toast('Could not render at ' + size + ' px: ' + (e && e.message || e)); }
+  saving = false;
 }
-$('saveC').onclick = () => savePNG(cells[4], 1024);
-$('saveBest').onclick = () => evo && savePNG(evo.baked(evo.best), 1024);
+const pngSize = () => +$('saveSize').value;
+$('saveC').onclick = () => savePNG(cells[4], pngSize());
+for (const id of ['saveSize', 'saveSizeA']) $(id).onchange = (e) => { $('saveSize').value = $('saveSizeA').value = e.target.value; store.set('gi.pngSize', e.target.value); };
+{ const v = store.get('gi.pngSize'); if (v) $('saveSize').value = $('saveSizeA').value = v; }
+$('saveBest').onclick = () => evo && savePNG(evo.baked(evo.best), pngSize());
 
 // ---------- interactive controls ----------
 $('amtv').textContent = amt();
 $('amt').oninput = () => { $('amtv').textContent = amt(); };
 $('back').onclick = back;
+$('fwd').onclick = forward;
 $('rand').onclick = () => { if (mode === 'A') { stopAuto(); setMode('I', true); } randomNine(); };
 $('bigC').onclick = () => cells[4] && openModal(cells[4]);
 $('copy').onclick = () => cells[4] && copyText(GP.toString(cells[4], 6));
 $('apply').onclick = () => {
   let t; try { t = GP.parse($('geno').value.replace(/;.*$/gm, '')); } catch (e) { toast('Parse error: ' + e.message); return; }
-  history.push(cells.map((x) => GP.toString(x)));
   drawTree(t, tiles[4].cv); breedFrom(t, true);
 };
 
@@ -597,7 +649,8 @@ document.addEventListener('keydown', (e) => {
   if (Movie.isOpen()) { if (e.key === 'Escape') Movie.close(); return; }
   if (Library.isOpen()) { if (e.key === 'Escape') Library.close(); return; }
   if (e.key === 'Escape') { if (!$('modal').classList.contains('hidden')) closeModal(); else clearPicks(); }
-  else if (e.key === 'Backspace' && mode === 'I') { e.preventDefault(); back(); }
+  else if ((e.key === 'Backspace' || e.key === 'ArrowLeft') && mode === 'I') { e.preventDefault(); back(); }
+  else if (e.key === 'ArrowRight' && mode === 'I') { e.preventDefault(); forward(); }
   else if (e.key === ' ' && mode === 'A') { e.preventDefault(); running ? stopAuto() : startAuto(); }
 });
 
@@ -608,13 +661,22 @@ async function canvasFromURL(url) {
   const c = makeSrcCanvas(), g = c.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(img, 0, 0, c.width, c.height);
   return c;
 }
-function recoverBreed(rec, k) { // breed interactively from image k of a saved run, as a new branch
+function recoverBreed(rec, k) { // breed interactively from image k of an auto run, as a new tree whose trunk is the run so far
   const tree = GP.parse(rec.steps[k].s);
   if (mode === 'A') setMode('I', true);
-  if (cells[0]) history.push(cells.map((t) => GP.toString(t)));
-  newLineageRun({ id: rec.id, step: k, title: rec.title }, rec.steps.slice(0, k + 1).map((x) => Object.assign({}, x)));
+  newTree({ id: rec.id, step: k, title: rec.title }, rec.steps.slice(0, k + 1));
   drawTree(tree, tiles[4].cv); breedFrom(tree, true);
   toast('Breeding from image ' + (k + 1) + ' of ' + rec.title);
+}
+// Re-enter a saved interactive tree at node k: show its grid as it was, or (tile given) take that
+// image of the grid and breed from it as a new branch.
+function resumeTree(rec, k, tile) {
+  if (mode === 'A') { stopAuto(); setMode('I', true); }
+  const t = Library.toTree(rec);
+  itree = Object.assign({}, rec, { nodes: t.nodes, head: t.head }); delete itree.steps;
+  moveTo(k);
+  if (tile != null) { const img = cells[tile]; if (tile !== 4) drawTree(img, tiles[4].cv); breedFrom(img, true); toast('New branch from generation ' + itree.nodes[k].d); }
+  else toast('Back at generation ' + itree.nodes[k].d + ' of ' + itree.title);
 }
 async function recoverAuto(rec, k) { // evolve further toward the run's target, seeded with image k
   let c; try { c = await canvasFromURL(rec.target); } catch (e) { toast('Could not load the saved target'); return; }
@@ -629,29 +691,39 @@ async function recoverAuto(rec, k) { // evolve further toward the run's target, 
 // ---------- start ----------
 (function init() {
   try {
-    const c = JSON.parse(store.get('gi.cells') || 'null'), h = JSON.parse(store.get('gi.history') || '[]');
-    const l = JSON.parse(store.get('gi.lineage') || '[]'), lr = JSON.parse(store.get('gi.linRun') || 'null');
-    if (Array.isArray(l)) lineage = l.filter((x) => x && typeof x.s === 'string');
-    if (lr && lr.id) linRec = lr; else newLineageRun(null, lineage);
-    if (Array.isArray(c) && c.length === 9) { cells = c.map(GP.parse); history = Array.isArray(h) ? h : []; renderAll(false); showGenome(); }
-    else randomNine();
-  } catch (e) { history = []; randomNine(); }
+    const c = JSON.parse(store.get('gi.cells') || 'null'), ref = JSON.parse(store.get('gi.tree') || 'null');
+    if (Array.isArray(c) && c.length === 9) {
+      cells = c.map(GP.parse); newTree(); addNode(); renderAll(false); showGenome();
+      if (ref && ref.id) store.set('gi.tree', JSON.stringify(ref)); // keep pointing at the saved tree until it has loaded
+      // the tree itself lives in the run library; swap it in once loaded (unless the user already moved on)
+      if (ref && ref.id) Library.ready.then(() => Library.getRun(ref.id)).then((rec) => {
+        if (!rec) { storeTreeRef(); return; }
+        if (itree.nodes.length > 1) return;
+        const t = Library.toTree(rec), head = ref.head >= 0 && ref.head < t.nodes.length ? ref.head : t.head;
+        itree = Object.assign({}, rec, { nodes: t.nodes, head }); delete itree.steps;
+        const g = t.nodes[head].grid;
+        if (!g || g.join('|') !== c.join('|')) addNode(); // the grid on screen is newer than the last save
+        storeTreeRef(); showGenome();
+      }).catch((e) => { console.warn('could not restore the interactive tree', e); storeTreeRef(); });
+    } else randomNine();
+  } catch (e) { randomNine(); }
   Movie.init({ GP, drawTree, saveFile, stamp, toast,
-    reels: () => ({ run: runReel, lineage, saved: savedReel }),
+    reels: () => ({ run: runReel, lineage: lineagePath(), saved: savedReel }),
     target: (src) => (src === 'run' ? targetSrc : src === 'saved' ? savedTarget : null),
     savedTitle: () => savedTitle,
     pause: () => { const was = running; stopAuto(); return was; },
     resume: (was) => { if (was && mode === 'A') startAuto(); } });
-  Library.init({ GP, Movie, drawTree, saveFile, stamp, toast, savePNG, copyText,
-    live: () => [autoRec && Object.assign({}, autoRec, { steps: runReel }), linRec && Object.assign({}, linRec, { steps: lineage })],
-    breedFrom: recoverBreed, continueAuto: recoverAuto,
+  Library.init({ GP, Movie, drawTree, saveFile, stamp, toast, savePNG, copyText, pngSize,
+    live: () => [autoRec && Object.assign({}, autoRec, { steps: runReel }),
+      itree && itree.nodes.length && Object.assign({}, itree, { steps: lineagePath(), sig: itree.nodes.length + ':' + itree.head })],
+    breedFrom: recoverBreed, continueAuto: recoverAuto, resumeTree,
     useAsTarget: (t) => { setMode('A'); setTargetFromTree(t, 'Saved image'); },
-    movie: async (rec) => { savedReel = rec.steps; savedTitle = rec.title; savedTarget = rec.target ? await canvasFromURL(rec.target) : null; Movie.open('saved'); } });
+    movie: async (rec, steps) => { savedReel = steps || rec.steps; savedTitle = rec.title; savedTarget = rec.target ? await canvasFromURL(rec.target) : null; Movie.open('saved'); } });
   $('libI').onclick = () => Library.open();
   $('libA').onclick = () => Library.open();
   $('movieI').onclick = () => Movie.open('lineage');
   $('movieA').onclick = () => Movie.open('run');
-  window.gi = { get lineage() { return lineage; }, get linRec() { return linRec; }, get autoRec() { return autoRec; }, recoverBreed, recoverAuto, get runReel() { return runReel; }, get cells() { return cells; }, get evo() { return evo; }, choose, preset, startAuto, stopAuto, setMode, GP };
+  window.gi = { get lineage() { return lineagePath(); }, get itree() { return itree; }, back, forward, resumeTree, get autoRec() { return autoRec; }, recoverBreed, recoverAuto, get runReel() { return runReel; }, get cells() { return cells; }, get evo() { return evo; }, choose, preset, startAuto, stopAuto, setMode, GP };
   requestAnimationFrame(frame);
 })();
 })();

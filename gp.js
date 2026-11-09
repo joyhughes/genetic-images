@@ -657,6 +657,18 @@ function evaluate(tree, N) {
   return o;
 }
 const release = (b) => pool.put(b);
+// Large renders: evaluate rows y0..y0+rows of an N×N image (strips keep memory bounded). Only valid
+// for trees without screen-space ops, which need the whole pixel grid at once.
+const SCREEN_OPS = new Set(['blur', 'gmag', 'gdir', 'bump', 'wgrad', 'hblur', 'vblur', 'sharpen', 'edges', 'emboss', 'erode', 'dilate']);
+const usesScreen = (t) => SCREEN_OPS.has(t.op) || t.a.some(usesScreen);
+function evaluateRows(tree, N, y0, rows) {
+  const n = N * rows, X = new Float32Array(n), Y = new Float32Array(n);
+  for (let j = 0; j < rows; j++) for (let i = 0; i < N; i++) { X[j * N + i] = (i + 0.5) / N * 2 - 1; Y[j * N + i] = 1 - (y0 + j + 0.5) / N * 2; }
+  const o = E({ N, n, alias: new Map() }, tree, X, Y);
+  for (let i = 0, L = o.length; i < L; i++) { const v = o[i]; o[i] = v === v ? (v > 1e4 ? 1e4 : v < -1e4 ? -1e4 : v) : 0; }
+  return o;
+}
+const clearPool = () => pool.free.clear(); // drop cached buffers after a big render
 // planar values -> RGBA bytes (display mapping: [-1,1] -> [0,255])
 function toRGBA(buf, N, out) {
   const n = N * N; out = out || new Uint8ClampedArray(n * 4);
@@ -1214,7 +1226,7 @@ class Evolver {
 }
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
-const GP = { setOffsetRate, getOffsetRate, setBoxRate, getBoxRate, OPS, TERMS, FUNCS, FAMILIES, setEnabled, setFamily, setAllEnabled, enabledNames, evaluate, release, toRGBA, randTree, randomInteresting, mutate, mutants, offspring, crossover, clone, size, depth,
+const GP = { usesScreen, evaluateRows, clearPool, setOffsetRate, getOffsetRate, setBoxRate, getBoxRate, OPS, TERMS, FUNCS, FAMILIES, setEnabled, setFamily, setAllEnabled, enabledNames, evaluate, release, toRGBA, randTree, randomInteresting, mutate, mutants, offspring, crossover, clone, size, depth,
   toString, pretty, parse, signature, sigStd, sigDist, Target, distance, bake, METRICS, DEFAULT_WEIGHTS, Evolver, noise2,
   setRandom: (f) => { rnd = f; }, seedRandom: (s) => { rnd = mulberry32(s); }, useMathRandom: () => { rnd = Math.random; } };
 if (typeof module !== 'undefined' && module.exports) module.exports = GP; else root.GP = GP;
