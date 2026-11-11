@@ -37,12 +37,55 @@ function drawTree(tree, canvas) {
   GP.toRGBA(b, N, img.data); GP.release(b); g.putImageData(img, 0, 0);
 }
 let queue = [], qGen = 0;
-const cancelRenders = () => { queue = []; qGen++; };
+const cancelRenders = () => { queue = []; RP.wait = []; qGen++; };
 const enqueue = (run) => queue.push({ gen: qGen, run });
 function pumpQueue(budget) {
   const t0 = performance.now();
   while (queue.length && performance.now() - t0 < budget) { const j = queue.shift(); if (j.gen === qGen) j.run(); }
 }
+// Grid tiles render in a small pool of workers: a big genome can take 100+ ms per tile, which on
+// the main thread froze the page during fast random walks. Without workers (or if they fail to
+// start) tiles render on the main thread between frames as before. Results from cancelled
+// renders are dropped.
+const RP = { ws: [], free: [], wait: [], jobs: new Map(), seq: 0, ok: false };
+(function startWorkers() {
+  if (typeof Worker === 'undefined') return;
+  try {
+    const n = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
+    for (let k = 0; k < n; k++) {
+      const w = new Worker('gp-worker.js');
+      w.onmessage = (e) => { const j = RP.jobs.get(e.data.id); RP.jobs.delete(e.data.id); RP.free.push(w); if (j) tileDone(j, e.data); pumpWorkers(); };
+      w.onerror = (e) => { if (e.preventDefault) e.preventDefault(); workersFailed(); };
+      RP.ws.push(w); RP.free.push(w);
+    }
+    RP.ok = true;
+  } catch (e) { workersFailed(); }
+})();
+function workersFailed() {
+  if (!RP.ws.length && !RP.ok) return;
+  console.warn('render workers unavailable, rendering on the main thread');
+  RP.ok = false; RP.ws.forEach((w) => w.terminate());
+  const redo = [...RP.jobs.values(), ...RP.wait]; RP.ws = []; RP.free = []; RP.wait = []; RP.jobs.clear();
+  for (const j of redo) if (j.gen === qGen) enqueue(() => { drawTree(j.tree, j.canvas); j.after(); });
+}
+function tileDone(j, d) {
+  if (j.gen !== qGen) return;
+  if (d.err) drawTree(j.tree, j.canvas); // shouldn't happen; let the main thread try (and report) it
+  else j.canvas.getContext('2d').putImageData(new ImageData(d.px, j.canvas.width, j.canvas.width), 0, 0);
+  j.after();
+}
+function pumpWorkers() {
+  while (RP.ok && RP.free.length && RP.wait.length) {
+    const j = RP.wait.shift(); if (j.gen !== qGen) continue;
+    const id = ++RP.seq; RP.jobs.set(id, j);
+    RP.free.pop().postMessage({ id, tree: j.tree, N: j.canvas.width });
+  }
+}
+function enqueueTile(tree, canvas, after = () => {}) {
+  if (!RP.ok) { enqueue(() => { drawTree(tree, canvas); after(); }); return; }
+  RP.wait.push({ gen: qGen, tree, canvas, after }); pumpWorkers();
+}
+const rendersPending = () => queue.length + RP.wait.length + RP.jobs.size;
 function emerge(i) { // child flies out of the centre tile into place
   const el = tiles[i].el, a = el.getBoundingClientRect(), c = tiles[4].el.getBoundingClientRect();
   el.style.transition = 'none';
@@ -126,7 +169,7 @@ function renderAll(anim) {
   for (let i = 0; i < 9; i++) {
     const t = tiles[i]; t.badge.style.display = 'none';
     if (anim && i !== 4) { t.el.style.opacity = '0'; }
-    enqueue(() => { drawTree(cells[i], t.cv); if (anim && i !== 4) emerge(i); else t.el.style.opacity = '1'; });
+    enqueueTile(cells[i], t.cv, () => { if (anim && i !== 4) emerge(i); else t.el.style.opacity = '1'; });
   }
 }
 function randomNine() {
@@ -142,7 +185,7 @@ function breedFrom(parent, anim, how) {
   tiles[4].el.style.opacity = '1';
   CHILD_CELLS.forEach((c) => { tiles[c].el.style.opacity = '0'; tiles[c].badge.style.display = 'none'; });
   tiles[4].badge.style.display = 'none';
-  CHILD_CELLS.forEach((c) => enqueue(() => { drawTree(cells[c], tiles[c].cv); if (anim) emerge(c); else tiles[c].el.style.opacity = '1'; }));
+  CHILD_CELLS.forEach((c) => enqueueTile(cells[c], tiles[c].cv, () => { if (anim) emerge(c); else tiles[c].el.style.opacity = '1'; }));
   addNode(how); showGenome(); save();
 }
 function flyToCenter(i, done) {
@@ -230,7 +273,7 @@ function mateNow() {
   cancelRenders();
   for (const t of tiles) t.badge.style.display = 'none';
   drawTree(cells[4], tiles[4].cv); tiles[4].el.style.opacity = '1';
-  CHILD_CELLS.forEach((c) => { tiles[c].el.style.opacity = '0'; enqueue(() => { drawTree(cells[c], tiles[c].cv); emerge(c); }); });
+  CHILD_CELLS.forEach((c) => { tiles[c].el.style.opacity = '0'; enqueueTile(cells[c], tiles[c].cv, () => emerge(c)); });
   addNode('mated'); showGenome(); save();
 }
 $('mateGo').onclick = mateNow;
@@ -599,7 +642,7 @@ function showPopulation(force) {
     t.badge.title = p.origin ? 'came from ' + p.origin : '';
     t.badge.style.display = 'block';
     t.el.style.opacity = '1';
-    if (shown[i] !== p.str || force) { shown[i] = p.str; enqueue(() => drawTree(baked, t.cv)); }
+    if (shown[i] !== p.str || force) { shown[i] = p.str; enqueueTile(baked, t.cv); }
   });
 }
 function updateStats() {
@@ -738,14 +781,14 @@ applyBoxes();
 // ---------- main loop ----------
 function frame() {
   const t0 = performance.now();
-  if (running && evo && mode === 'A') evo.step(queue.length ? 14 : 22);
+  if (running && evo && mode === 'A') evo.step(rendersPending() ? 14 : 22);
   if (evo) noteRun();
   pumpQueue(Math.max(6, 28 - (performance.now() - t0)));
   const now = performance.now();
-  if (mode === 'R' && walking && !busy && !queue.length && !picks.length && now - walkT > walkDelay() * 1000) walkStep();
+  if (mode === 'R' && walking && !busy && !rendersPending() && !picks.length && now - walkT > walkDelay() * 1000) walkStep();
   if (mode === 'A' && evo) {
     if (now - lastStats > 250) { lastStats = now; drawBest(); updateStats(); }
-    if (running && now - lastGrid > 1500 && !queue.length) { lastGrid = now; showPopulation(false); }
+    if (running && now - lastGrid > 1500 && !rendersPending()) { lastGrid = now; showPopulation(false); }
   }
   requestAnimationFrame(frame);
 }
@@ -832,7 +875,7 @@ async function recoverAuto(rec, k) { // evolve further toward the run's target, 
   $('movieR').onclick = () => { stopWalk(); Movie.open('lineage'); };
   $('libR').onclick = () => { stopWalk(); Library.open(); };
   $('movieA').onclick = () => Movie.open('run');
-  window.gi = { get lineage() { return lineagePath(); }, get itree() { return itree; }, back, forward, resumeTree, get autoRec() { return autoRec; }, recoverBreed, recoverAuto, get runReel() { return runReel; }, get cells() { return cells; }, get evo() { return evo; }, startWalk, stopWalk, walkStep, get walkN() { return walkN; }, scoreKids, choose, preset, startAuto, stopAuto, setMode, GP };
+  window.gi = { RP, get lineage() { return lineagePath(); }, get itree() { return itree; }, back, forward, resumeTree, get autoRec() { return autoRec; }, recoverBreed, recoverAuto, get runReel() { return runReel; }, get cells() { return cells; }, get evo() { return evo; }, startWalk, stopWalk, walkStep, get walkN() { return walkN; }, scoreKids, choose, preset, startAuto, stopAuto, setMode, GP };
   requestAnimationFrame(frame);
 })();
 })();

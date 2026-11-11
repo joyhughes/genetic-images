@@ -1226,7 +1226,8 @@ class Evolver {
 }
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
-const GP = { usesScreen, evaluateRows, clearPool, setOffsetRate, getOffsetRate, setBoxRate, getBoxRate, OPS, TERMS, FUNCS, FAMILIES, setEnabled, setFamily, setAllEnabled, enabledNames, evaluate, release, toRGBA, randTree, randomInteresting, mutate, mutants, offspring, crossover, clone, size, depth,
+function poolStats() { let bufs = 0, bytes = 0; for (const l of pool.free.values()) for (const b of l) { bufs++; bytes += b.byteLength; } return { sizes: pool.free.size, bufs, bytes }; }
+const GP = { poolStats, usesScreen, evaluateRows, clearPool, setOffsetRate, getOffsetRate, setBoxRate, getBoxRate, OPS, TERMS, FUNCS, FAMILIES, setEnabled, setFamily, setAllEnabled, enabledNames, evaluate, release, toRGBA, randTree, randomInteresting, mutate, mutants, offspring, crossover, clone, size, depth,
   toString, pretty, parse, signature, sigStd, sigDist, Target, distance, bake, METRICS, DEFAULT_WEIGHTS, Evolver, noise2,
   setRandom: (f) => { rnd = f; }, seedRandom: (s) => { rnd = mulberry32(s); }, useMathRandom: () => { rnd = Math.random; } };
 if (typeof module !== 'undefined' && module.exports) module.exports = GP; else root.GP = GP;

@@ -26,6 +26,11 @@ Open `index.html` through any static server (`python3 -m http.server`), no build
 
   Novel keeps the biggest step-to-step change (0.29 vs 0.18–0.19). Only the newest 400 walk steps
   keep their full grid of nine; older ones keep the chosen image and regenerate mutants on revisit.
+- **Responsiveness**: grid tiles render in a pool of up to 4 Web Workers (`gp-worker.js`); without
+  workers they render on the main thread between frames. A fast random walk had grown genomes to
+  the 120-node cap. At about 80 ms per 256 px tile on the main thread, that ran at 8–15 fps
+  with frames up to 180 ms. With workers it holds 60 fps and steps about 5x faster (~7.5 steps/s
+  at the 0.1 s setting). The JS heap stayed flat at 4–9 MB in both cases: it wasn't a leak.
 - **Saving**: Save PNG (512/1024/2048) and Save genome in the large view, Save centre PNG,
   Save best PNG. Inside claude.ai the page uses the artifact `downloads` capability (you confirm
   each save); elsewhere a normal download.
