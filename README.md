@@ -6,6 +6,26 @@ Open `index.html` through any static server (`python3 -m http.server`), no build
 - **Interactive**: click one of the nine images; it flies to the centre and the other eight become its
   mutants. Click the centre to re-roll its mutants. Back / Backspace undoes. Genomes are Lisp-style
   expressions you can copy, edit, and paste back.
+- **Random evolve**: evolution with no goal. Every step one of the eight mutants is chosen and
+  bred from, at 0.1 to 30 s per step, optionally pausing after N steps. Steps are ordinary nodes of
+  the interactive tree (captioned "(random)"), so Back, branching, the library and movies all work.
+  Clicking an image steers: the walk carries on from it. Pickers are weighted draws, never an argmax:
+  - *Pure chance*: uniform.
+  - *Lively*: (contrast × structure)², measured on the 20 px signature; structure is a bump around
+    mean-neighbour-difference / std ≈ 0.45 (gradients ≈ 0.1, white noise ≈ 1.1).
+  - *Novel*: (distance from the last 12 centres)^1.5 × structure. Without the structure term,
+    pixel noise wins because it always looks different.
+
+  Offline, over 6 walks of 120 steps each, the share of centres that were pixel noise was:
+
+  | Picker | Before the structure term | With it |
+  |---|---|---|
+  | Chance | 26–36% | |
+  | Lively | | 1–2% |
+  | Novel | 34% | 6% |
+
+  Novel keeps the biggest step-to-step change (0.29 vs 0.18–0.19). Only the newest 400 walk steps
+  keep their full grid of nine; older ones keep the chosen image and regenerate mutants on revisit.
 - **Saving**: Save PNG (512/1024/2048) and Save genome in the large view, Save centre PNG,
   Save best PNG. Inside claude.ai the page uses the artifact `downloads` capability (you confirm
   each save); elsewhere a normal download.

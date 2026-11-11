@@ -57,7 +57,7 @@ function toast(msg) { const t = $('toast'); t.textContent = msg; t.classList.add
 // ---------- interactive state ----------
 let cells = new Array(9).fill(null);
 let busy = false;
-const amt = () => +$('amt').value;
+const amt = () => +$(mode === 'R' ? 'rAmt' : 'amt').value;
 
 // The interactive session is a tree, saved as one run (run library). Each node is a grid of nine
 // the user was shown: { p: parent index, d: depth, s: centre genome, grid: [9 genomes], cap, last:
@@ -89,7 +89,8 @@ function moveTo(i) { // show node i's grid exactly as it was (gridless nodes, e.
   cells = n.grid.map(GP.parse); renderAll(false); showGenome(); save();
 }
 function forward() {
-  if (busy || !itree) return;
+  if (!itree) return;
+  if (busy) { setTimeout(forward, 100); return; }
   const kids = childrenOf(itree.head); if (!kids.length) return;
   const n = itree.nodes[itree.head]; moveTo(kids.includes(n.last) ? n.last : kids[kids.length - 1]);
 }
@@ -98,7 +99,7 @@ function save() {
 }
 // Tiles already taken from this grid (their branch is in the tree) get a ↳ badge.
 function markExplored() {
-  if (mode !== 'I' || !itree || itree.head < 0) return;
+  if (mode === 'A' || !itree || itree.head < 0) return;
   const kidsOf = new Map(); itree.nodes.forEach((n, j) => { if (!kidsOf.has(n.p)) kidsOf.set(n.p, []); kidsOf.get(n.p).push(j); });
   const taken = new Map();
   for (const k of kidsOf.get(itree.head) || []) {
@@ -115,7 +116,8 @@ function markExplored() {
 function showGenome() {
   $('geno').value = cells[4] ? GP.pretty(cells[4]) : '';
   const h = itree && itree.nodes[itree.head];
-  $('back').disabled = !h || h.p < 0; $('fwd').disabled = !h || !childrenOf(itree.head).length;
+  $('back').disabled = $('rBack').disabled = !h || h.p < 0; $('fwd').disabled = !h || !childrenOf(itree.head).length;
+  if (mode === 'R') walkStats();
   setTimeout(markExplored, 0);
 }
 function renderAll(anim) {
@@ -132,7 +134,7 @@ function randomNine() {
   newTree(); addNode();
   renderAll(false); showGenome(); save();
 }
-function breedFrom(parent, anim) {
+function breedFrom(parent, anim, how) {
   if (picks.length) clearPicks();
   const kids = GP.mutants(parent, 8, amt());
   cells[4] = parent; CHILD_CELLS.forEach((c, j) => { cells[c] = kids[j]; });
@@ -141,7 +143,7 @@ function breedFrom(parent, anim) {
   CHILD_CELLS.forEach((c) => { tiles[c].el.style.opacity = '0'; tiles[c].badge.style.display = 'none'; });
   tiles[4].badge.style.display = 'none';
   CHILD_CELLS.forEach((c) => enqueue(() => { drawTree(cells[c], tiles[c].cv); if (anim) emerge(c); else tiles[c].el.style.opacity = '1'; }));
-  addNode(); showGenome(); save();
+  addNode(how); showGenome(); save();
 }
 function flyToCenter(i, done) {
   const src = tiles[i], a = src.el.getBoundingClientRect(), c = tiles[4].el.getBoundingClientRect();
@@ -161,21 +163,29 @@ function flyToCenter(i, done) {
   };
   fly.addEventListener('transitionend', end); setTimeout(end, 650);
 }
-function choose(i) {
+function choose(i, how) {
   if (busy || !cells[i]) return;
   const parent = cells[i];
-  if (i === 4) { breedFrom(parent, true); return; }
+  if (i === 4) { breedFrom(parent, true, how); return; }
   busy = true; cancelRenders();
-  flyToCenter(i, () => { busy = false; breedFrom(parent, true); });
+  flyToCenter(i, () => { busy = false; breedFrom(parent, true, how); });
 }
 function back() {
-  if (busy || !itree) return;
+  if (!itree) return;
+  if (busy) { setTimeout(back, 100); return; } // mid-flight: go back once the choice has landed
   const h = itree.nodes[itree.head]; if (h && h.p >= 0) moveTo(h.p);
 }
 function onTileClick(i) {
   if (mode === 'A') {
     if (!cells[i]) return;
     stopAuto(); setMode('I', true); // keep the evolved grid as the interactive grid
+  }
+  if (mode === 'R' && cells[i]) { // steering: take the image clicked (as it was when clicked) and carry on from it
+    walkT = performance.now() + 1500;
+    const t = cells[i];
+    if (!busy) { choose(i); return; }
+    const later = () => { if (busy) { setTimeout(later, 50); return; } drawTree(t, tiles[4].cv); breedFrom(t, true); walkT = performance.now() + 1500; };
+    later(); return;
   }
   choose(i);
 }
@@ -303,8 +313,8 @@ for (const id of ['saveSize', 'saveSizeA']) $(id).onchange = (e) => { $('saveSiz
 $('saveBest').onclick = () => evo && savePNG(evo.baked(evo.best), pngSize());
 
 // ---------- interactive controls ----------
-$('amtv').textContent = amt();
-$('amt').oninput = () => { $('amtv').textContent = amt(); };
+$('amtv').textContent = $('amt').value;
+$('amt').oninput = () => { $('amtv').textContent = $('amt').value; };
 $('back').onclick = back;
 $('fwd').onclick = forward;
 $('rand').onclick = () => { if (mode === 'A') { stopAuto(); setMode('I', true); } randomNine(); };
@@ -315,6 +325,100 @@ $('apply').onclick = () => {
   drawTree(t, tiles[4].cv); breedFrom(t, true);
 };
 
+// ---------- random evolve ----------
+// Evolution without a goal: every step one of the eight mutants is picked for the user and bred
+// from. The steps are ordinary nodes of the interactive tree (caption "(random)"), so Back,
+// branching, the library and movies all work on a walk. Choosing is a weighted draw, never an
+// argmax, so "Lively" and "Novel" only lean the walk; they can't lock onto one trick.
+let walking = false, walkT = 0, walkN = 0, walkLastPick = '';
+const SPEEDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10, 15, 20, 30];
+const walkDelay = () => SPEEDS[+$('rSpeed').value];
+const WALK_GRIDS = 400; // walk steps keeping their full grid of nine; older ones keep only the chosen image
+const PICK_WHY = {
+  chance: 'Each of the eight is equally likely.',
+  lively: 'Weighted by contrast × structure: flat images and pixel noise are unlikely, but nothing is ruled out.',
+  novel: 'Weighted by how different each image looks from the last 12 centres on the path, so the walk keeps moving (damped for pixel noise, which always looks different).',
+};
+const sigCache = new Map();
+function sigOfStr(str) {
+  let s = sigCache.get(str);
+  if (!s) { s = GP.signature(GP.parse(str)); if (sigCache.size > 400) sigCache.clear(); sigCache.set(str, s); }
+  return s;
+}
+// Contrast and structure at 20 px. Structure looks at mean neighbour difference over standard deviation: smooth gradients sit
+// near 0.1, edges and patterns in the middle, white noise near 1.1.
+function lively(sg) {
+  const n = 400, std = GP.sigStd(sg); let d = 0, c = 0;
+  for (let ch = 0; ch < 3; ch++) for (let y = 0; y < 20; y++) for (let x = 0; x < 20; x++) {
+    const i = ch * n + y * 20 + x;
+    if (x < 19) { d += Math.abs(sg[i] - sg[i + 1]); c++; }
+    if (y < 19) { d += Math.abs(sg[i] - sg[i + 20]); c++; }
+  }
+  const r = d / c / (std + 1e-6), structure = 0.15 + Math.exp(-(((r - 0.45) / 0.3) ** 2));
+  return { contrast: std + 0.02, structure };
+}
+function scoreKids(how) {
+  const strs = CHILD_CELLS.map((c) => GP.toString(cells[c]));
+  if (how === 'chance') return strs.map(() => 1);
+  const sigs = strs.map(sigOfStr);
+  if (how === 'lively') return sigs.map((sg) => { const l = lively(sg); return (l.contrast * l.structure) ** 2; });
+  // pixel noise always looks "different", so novelty is damped by the same structure term
+  const recent = pathTo(itree.head).slice(-12).map((n) => sigOfStr(n.s));
+  return sigs.map((sg) => Math.max(1e-4, Math.min(...recent.map((o) => GP.sigDist(o, sg)))) ** 1.5 * lively(sg).structure);
+}
+function walkStep() {
+  if (!itree || itree.head < 0 || cells.some((c) => !c)) return;
+  const w = scoreKids($('rPick').value), tot = w.reduce((a, b) => a + b, 0);
+  let r = Math.random() * tot, j = 0;
+  while (j < 7 && (r -= w[j]) > 0) j++;
+  const i = CHILD_CELLS[j];
+  walkLastPick = `tile ${j < 4 ? j + 1 : j + 2} of 9, chance ${(100 * w[j] / tot).toFixed(0)}%`;
+  walkN++; walkT = performance.now();
+  if (walkDelay() < 0.7) { tiles[4].cv.getContext('2d').drawImage(tiles[i].cv, 0, 0); breedFrom(cells[i], false, 'random'); }
+  else choose(i, 'random');
+  trimWalkGrids();
+  if ($('rStop').checked && walkN >= +$('rStopN').value) { stopWalk(); toast('Paused after ' + walkN + ' steps'); }
+  walkStats();
+}
+function trimWalkGrids() {
+  let kept = 0;
+  for (let k = itree.nodes.length - 1; k >= 0; k--) {
+    const n = itree.nodes[k];
+    if (!n.cap || !n.cap.endsWith('(random)') || !n.grid) continue;
+    if (++kept > WALK_GRIDS && k !== itree.head) n.grid = null;
+  }
+}
+function startWalk() {
+  if (mode !== 'R') setMode('R');
+  if (!itree || itree.head < 0) randomNine();
+  if (itree.nodes.length <= 1) itree.title = 'Random walk';
+  else if (itree.title === 'Interactive lineage') itree.title = 'Interactive lineage + random walk';
+  walking = true; walkN = 0; walkT = performance.now() - walkDelay() * 1000; $('rRun').textContent = '❚❚ Pause'; walkStats();
+}
+function stopWalk() { if (!walking) return; walking = false; $('rRun').textContent = '▶ Start'; walkStats(); }
+function walkStats() {
+  const h = itree && itree.nodes[itree.head];
+  $('rStats').textContent = !h ? '' :
+    `this walk     ${walkN} step${walkN === 1 ? '' : 's'}${walking ? '' : '  (paused)'}\n` +
+    `generation    ${h.d}\n` +
+    `centre size   ${GP.size(cells[4])} nodes\n` +
+    `tree          ${itree.nodes.length} grids, ${itree.nodes.length - new Set(itree.nodes.map((n) => n.p)).size + (itree.nodes[0].p < 0 ? 1 : 0)} branch ends\n` +
+    (walkLastPick ? `last pick     ${walkLastPick}` : '');
+}
+$('rRun').onclick = () => (walking ? stopWalk() : startWalk());
+$('rBack').onclick = () => { stopWalk(); back(); walkStats(); };
+$('rRand').onclick = () => { randomNine(); walkStats(); };
+$('rSave').onclick = () => savePNG(cells[4], pngSize());
+const rLabels = () => {
+  const v = walkDelay(); $('rSpv').textContent = v < 1 ? Math.round(v * 1000) + ' ms' : v + ' s';
+  $('rAmtv').textContent = $('rAmt').value; $('rWhy').textContent = PICK_WHY[$('rPick').value];
+  store.set('gi.walk', JSON.stringify({ speed: $('rSpeed').value, amt: $('rAmt').value, pick: $('rPick').value, stop: $('rStop').checked, stopN: $('rStopN').value }));
+};
+try { const o = JSON.parse(store.get('gi.walk') || 'null'); if (o) { $('rSpeed').value = o.speed; $('rAmt').value = o.amt; $('rPick').value = o.pick; $('rStop').checked = !!o.stop; $('rStopN').value = o.stopN; } } catch (e) { /* defaults */ }
+for (const id of ['rSpeed', 'rAmt', 'rPick', 'rStop', 'rStopN']) $(id).addEventListener('input', rLabels);
+$('rPick').addEventListener('change', rLabels);
+rLabels();
+
 // ---------- auto-evolve ----------
 let mode = 'I', savedInteractive = null;
 let evo = null, running = false, target = null, targetSrc = null, targetName = '';
@@ -324,22 +428,23 @@ const tgtSize = 512; // kept larger than the match resolution so movies can show
 
 function setMode(m, keepGrid) {
   if (m === mode) return;
-  mode = m; clearPicks();
-  $('tabI').classList.toggle('on', m === 'I'); $('tabA').classList.toggle('on', m === 'A');
-  $('paneI').classList.toggle('hidden', m !== 'I'); $('paneA').classList.toggle('hidden', m !== 'A');
+  const prev = mode; mode = m; clearPicks();
+  for (const k of 'IRA') { $('tab' + k).classList.toggle('on', m === k); $('pane' + k).classList.toggle('hidden', m !== k); }
+  if (m !== 'R') stopWalk();
   if (m === 'A') {
     savedInteractive = cells.map((t) => GP.toString(t));
     shown.fill('');
     if (evo) showPopulation(true);
   } else {
     stopAuto();
-    if (!keepGrid && savedInteractive) { cells = savedInteractive.map(GP.parse); renderAll(false); }
+    if (prev === 'A' && !keepGrid && savedInteractive) { cells = savedInteractive.map(GP.parse); renderAll(false); }
     for (const t of tiles) t.badge.style.display = 'none';
     showGenome(); save();
   }
 }
 $('tabI').onclick = () => setMode('I');
 $('tabA').onclick = () => setMode('A');
+$('tabR').onclick = () => setMode('R');
 
 function makeSrcCanvas() { const c = document.createElement('canvas'); c.width = c.height = tgtSize; return c; }
 function setTargetCanvas(c, name) {
@@ -637,6 +742,7 @@ function frame() {
   if (evo) noteRun();
   pumpQueue(Math.max(6, 28 - (performance.now() - t0)));
   const now = performance.now();
+  if (mode === 'R' && walking && !busy && !queue.length && !picks.length && now - walkT > walkDelay() * 1000) walkStep();
   if (mode === 'A' && evo) {
     if (now - lastStats > 250) { lastStats = now; drawBest(); updateStats(); }
     if (running && now - lastGrid > 1500 && !queue.length) { lastGrid = now; showPopulation(false); }
@@ -649,8 +755,9 @@ document.addEventListener('keydown', (e) => {
   if (Movie.isOpen()) { if (e.key === 'Escape') Movie.close(); return; }
   if (Library.isOpen()) { if (e.key === 'Escape') Library.close(); return; }
   if (e.key === 'Escape') { if (!$('modal').classList.contains('hidden')) closeModal(); else clearPicks(); }
-  else if ((e.key === 'Backspace' || e.key === 'ArrowLeft') && mode === 'I') { e.preventDefault(); back(); }
-  else if (e.key === 'ArrowRight' && mode === 'I') { e.preventDefault(); forward(); }
+  else if ((e.key === 'Backspace' || e.key === 'ArrowLeft') && mode !== 'A') { e.preventDefault(); stopWalk(); back(); }
+  else if (e.key === 'ArrowRight' && mode !== 'A') { e.preventDefault(); stopWalk(); forward(); }
+  else if (e.key === ' ' && mode === 'R') { e.preventDefault(); walking ? stopWalk() : startWalk(); }
   else if (e.key === ' ' && mode === 'A') { e.preventDefault(); running ? stopAuto() : startAuto(); }
 });
 
@@ -722,8 +829,10 @@ async function recoverAuto(rec, k) { // evolve further toward the run's target, 
   $('libI').onclick = () => Library.open();
   $('libA').onclick = () => Library.open();
   $('movieI').onclick = () => Movie.open('lineage');
+  $('movieR').onclick = () => { stopWalk(); Movie.open('lineage'); };
+  $('libR').onclick = () => { stopWalk(); Library.open(); };
   $('movieA').onclick = () => Movie.open('run');
-  window.gi = { get lineage() { return lineagePath(); }, get itree() { return itree; }, back, forward, resumeTree, get autoRec() { return autoRec; }, recoverBreed, recoverAuto, get runReel() { return runReel; }, get cells() { return cells; }, get evo() { return evo; }, choose, preset, startAuto, stopAuto, setMode, GP };
+  window.gi = { get lineage() { return lineagePath(); }, get itree() { return itree; }, back, forward, resumeTree, get autoRec() { return autoRec; }, recoverBreed, recoverAuto, get runReel() { return runReel; }, get cells() { return cells; }, get evo() { return evo; }, startWalk, stopWalk, walkStep, get walkN() { return walkN; }, scoreKids, choose, preset, startAuto, stopAuto, setMode, GP };
   requestAnimationFrame(frame);
 })();
 })();
