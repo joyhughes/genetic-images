@@ -52,15 +52,32 @@ const RP = { ws: [], free: [], wait: [], jobs: new Map(), seq: 0, ok: false };
   if (typeof Worker === 'undefined') return;
   try {
     const n = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
-    for (let k = 0; k < n; k++) {
-      const w = new Worker('gp-worker.js');
-      w.onmessage = (e) => { const j = RP.jobs.get(e.data.id); RP.jobs.delete(e.data.id); RP.free.push(w); if (j) tileDone(j, e.data); pumpWorkers(); };
-      w.onerror = (e) => { if (e.preventDefault) e.preventDefault(); workersFailed(); };
-      RP.ws.push(w); RP.free.push(w);
-    }
+    for (let k = 0; k < n; k++) { const w = makeWorker(); RP.ws.push(w); RP.free.push(w); }
     RP.ok = true;
   } catch (e) { workersFailed(); }
 })();
+// A tile that takes longer than this (or whose worker died without a word) is given up on: its
+// worker is replaced, the tile is drawn grey, and the random walk won't pick it. Before this, one
+// stuck render held the walk (which waits for the grid to finish) forever.
+const TILE_TIMEOUT = 12000, tooSlow = new Set();
+function makeWorker() {
+  const w = new Worker('gp-worker.js');
+  w.onmessage = (e) => { const j = RP.jobs.get(e.data.id); RP.jobs.delete(e.data.id); RP.free.push(w); if (j) tileDone(j, e.data); pumpWorkers(); };
+  w.onerror = (e) => { if (e.preventDefault) e.preventDefault(); workersFailed(); };
+  return w;
+}
+function checkStuckTiles(now) {
+  if (!RP.ok) return;
+  for (const [id, j] of RP.jobs) {
+    if (now - j.t0 < TILE_TIMEOUT) continue;
+    RP.jobs.delete(id); j.w.terminate();
+    const w = makeWorker(); RP.ws[RP.ws.indexOf(j.w)] = w; RP.free.push(w);
+    tooSlow.add(GP.toString(j.tree));
+    console.warn('tile render timed out after ' + TILE_TIMEOUT / 1000 + ' s; skipped');
+    if (j.gen === qGen) { const g = j.canvas.getContext('2d'); g.fillStyle = '#444'; g.fillRect(0, 0, j.canvas.width, j.canvas.height); j.after(); }
+  }
+  pumpWorkers();
+}
 function workersFailed() {
   if (!RP.ws.length && !RP.ok) return;
   console.warn('render workers unavailable, rendering on the main thread');
@@ -77,8 +94,8 @@ function tileDone(j, d) {
 function pumpWorkers() {
   while (RP.ok && RP.free.length && RP.wait.length) {
     const j = RP.wait.shift(); if (j.gen !== qGen) continue;
-    const id = ++RP.seq; RP.jobs.set(id, j);
-    RP.free.pop().postMessage({ id, tree: j.tree, N: j.canvas.width });
+    const id = ++RP.seq, w = RP.free.pop(); j.t0 = performance.now(); j.w = w; RP.jobs.set(id, j);
+    w.postMessage({ id, tree: j.tree, N: j.canvas.width });
   }
 }
 function enqueueTile(tree, canvas, after = () => {}) {
@@ -411,7 +428,9 @@ function scoreKids(how) {
 }
 function walkStep() {
   if (!itree || itree.head < 0 || cells.some((c) => !c)) return;
-  const w = scoreKids($('rPick').value), tot = w.reduce((a, b) => a + b, 0);
+  const w = scoreKids($('rPick').value).map((x, j) => (tooSlow.has(GP.toString(cells[CHILD_CELLS[j]])) ? 0 : x));
+  if (!w.some((x) => x > 0)) { stopWalk(); toast('Every image here is too slow to render; pick another'); return; }
+  const tot = w.reduce((a, b) => a + b, 0);
   let r = Math.random() * tot, j = 0;
   while (j < 7 && (r -= w[j]) > 0) j++;
   const i = CHILD_CELLS[j];
@@ -433,6 +452,7 @@ function trimWalkGrids() {
 }
 function startWalk() {
   if (mode !== 'R') setMode('R');
+  clearPicks();
   if (!itree || itree.head < 0) randomNine();
   if (itree.nodes.length <= 1) itree.title = 'Random walk';
   else if (itree.title === 'Interactive lineage') itree.title = 'Interactive lineage + random walk';
@@ -446,7 +466,17 @@ function walkStats() {
     `generation    ${h.d}\n` +
     `centre size   ${GP.size(cells[4])} nodes\n` +
     `tree          ${itree.nodes.length} grids, ${itree.nodes.length - new Set(itree.nodes.map((n) => n.p)).size + (itree.nodes[0].p < 0 ? 1 : 0)} branch ends\n` +
-    (walkLastPick ? `last pick     ${walkLastPick}` : '');
+    (walkLastPick ? `last pick     ${walkLastPick}` : '') + (walkWait ? `\nwaiting       ${walkWait}` : '');
+}
+let walkWait = '';
+function noteWalkWait(now) { // say why a running walk isn't stepping, if it's been a while
+  let why = '';
+  if (walking && now - walkT > walkDelay() * 1000 + 2000) {
+    const n = rendersPending();
+    why = picks.length ? 'for the ♥ mate picks to be cleared (Esc)' : busy ? 'for the chosen image to land' :
+      n ? `for ${n} image${n === 1 ? '' : 's'} to render` : '';
+  }
+  if (why !== walkWait) { walkWait = why; walkStats(); }
 }
 $('rRun').onclick = () => (walking ? stopWalk() : startWalk());
 $('rBack').onclick = () => { stopWalk(); back(); walkStats(); };
@@ -780,17 +810,22 @@ applyBoxes();
 
 // ---------- main loop ----------
 function frame() {
+  try { frameBody(); } catch (e) { console.error(e); if (walking) { stopWalk(); toast('Random evolve stopped: ' + (e && e.message || e)); } }
+  requestAnimationFrame(frame);
+}
+function frameBody() {
   const t0 = performance.now();
+  checkStuckTiles(t0);
   if (running && evo && mode === 'A') evo.step(rendersPending() ? 14 : 22);
   if (evo) noteRun();
   pumpQueue(Math.max(6, 28 - (performance.now() - t0)));
   const now = performance.now();
   if (mode === 'R' && walking && !busy && !rendersPending() && !picks.length && now - walkT > walkDelay() * 1000) walkStep();
+  if (mode === 'R') noteWalkWait(now);
   if (mode === 'A' && evo) {
     if (now - lastStats > 250) { lastStats = now; drawBest(); updateStats(); }
     if (running && now - lastGrid > 1500 && !rendersPending()) { lastGrid = now; showPopulation(false); }
   }
-  requestAnimationFrame(frame);
 }
 
 document.addEventListener('keydown', (e) => {
